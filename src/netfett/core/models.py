@@ -37,6 +37,7 @@ class Packet:
     dst_port: int | None = None
     length: int = 0           # Gesamtlänge des Pakets in Bytes
     info: str = ""            # Kurzbeschreibung (Wireshark-ähnlich)
+    domain: str = ""          # kontaktierte Domain: DNS-Query / TLS-SNI / HTTP-Host
 
     @property
     def ports(self) -> tuple[int | None, int | None]:

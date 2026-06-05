@@ -10,6 +10,7 @@ import socket
 import struct
 
 from . import protocols as P
+from .ipinfo import classify
 from .models import DIR_IN, DIR_OUT, DIR_UNKNOWN, Layer, Packet
 
 # TCP-Flag-Bits (Byte 13 des TCP-Kopfs).
@@ -44,10 +45,12 @@ def dissect(raw: bytes, ts: float, number: int,
         return pkt
 
     version = raw[0] >> 4
+    if version == 6:
+        _dissect_ipv6(raw, pkt, local_ips)
+        return pkt
     if version != 4:
-        # Raw-Socket ist IPv4-only; alles andere nur grob anzeigen.
         pkt.protocol = f"IPv{version}"
-        pkt.info = f"Nicht-IPv4-Paket (Version {version})"
+        pkt.info = f"Unbekannte IP-Version ({version})"
         pkt.layers.append(Layer(f"IPv{version}", length=len(raw)))
         return pkt
 
@@ -92,7 +95,9 @@ def _dissect_ipv4(raw: bytes, pkt: Packet, local_ips: set[str]) -> None:
             ("Protokoll", f"{pname} ({proto})"),
             ("Header-Prüfsumme", f"0x{checksum:04x}"),
             ("Quelle", src),
+            ("Quelle – Netz", classify(src)),
             ("Ziel", dst),
+            ("Ziel – Netz", classify(dst)),
         ],
     )
     pkt.layers.append(layer)
@@ -114,6 +119,112 @@ def _dissect_ipv4(raw: bytes, pkt: Packet, local_ips: set[str]) -> None:
         if payload:
             pkt.layers.append(Layer("Daten", f"{len(payload)} Bytes",
                                     start=ihl, length=len(payload)))
+
+
+# IPv6-Extension-Header, die wir bis zur Oberschicht überspringen.
+_V6_EXT = {0, 43, 60}          # Hop-by-Hop, Routing, Destination Options
+_V6_FRAGMENT = 44
+_ICMPV6_TYPES = {
+    1: "Destination Unreachable", 2: "Packet Too Big", 3: "Time Exceeded",
+    4: "Parameter Problem", 128: "Echo Request", 129: "Echo Reply",
+    133: "Router Solicitation", 134: "Router Advertisement",
+    135: "Neighbor Solicitation", 136: "Neighbor Advertisement",
+}
+
+
+def _ip6_str(raw16: bytes) -> str:
+    return socket.inet_ntop(socket.AF_INET6, raw16)
+
+
+def _dissect_ipv6(raw: bytes, pkt: Packet, local_ips: set[str]) -> None:
+    if len(raw) < 40:
+        pkt.protocol = "IPv6"
+        pkt.info = f"Verkürztes IPv6-Paket ({len(raw)} Bytes)"
+        pkt.layers.append(Layer("IPv6", length=len(raw)))
+        return
+    vtf, payload_len, nexthdr, hop = struct.unpack("!IHBB", raw[:8])
+    traffic_class = (vtf >> 20) & 0xFF
+    flow_label = vtf & 0xFFFFF
+    src = _ip6_str(raw[8:24])
+    dst = _ip6_str(raw[24:40])
+
+    pkt.src, pkt.dst = src, dst
+    pkt.direction = _direction(src, dst, local_ips)
+    pkt.protocol = P.proto_name(nexthdr)
+    pkt.l4 = pkt.protocol
+
+    pkt.layers.append(Layer(
+        name="Internet Protocol Version 6",
+        summary=f"{src} → {dst}",
+        start=0, length=40,
+        fields=[
+            ("Version", "6"),
+            ("Traffic Class", f"0x{traffic_class:02x}"),
+            ("Flow Label", f"0x{flow_label:05x}"),
+            ("Payload-Länge", str(payload_len)),
+            ("Next Header", f"{P.proto_name(nexthdr)} ({nexthdr})"),
+            ("Hop Limit", str(hop)),
+            ("Quelle", src),
+            ("Quelle – Netz", classify(src)),
+            ("Ziel", dst),
+            ("Ziel – Netz", classify(dst)),
+        ],
+    ))
+
+    nexthdr, payload, offset = _skip_v6_ext(nexthdr, raw[40:], 40)
+    pkt.protocol = P.proto_name(nexthdr)
+    pkt.l4 = pkt.protocol
+
+    if nexthdr == 6:
+        _dissect_tcp(payload, offset, pkt)
+    elif nexthdr == 17:
+        _dissect_udp(payload, offset, pkt)
+    elif nexthdr == 58:
+        _dissect_icmpv6(payload, offset, pkt)
+    else:
+        pkt.info = f"{P.proto_name(nexthdr)} {src} → {dst}"
+        if payload:
+            pkt.layers.append(Layer("Daten", f"{len(payload)} Bytes",
+                                    start=offset, length=len(payload)))
+
+
+def _skip_v6_ext(nexthdr: int, payload: bytes,
+                 offset: int) -> tuple[int, bytes, int]:
+    """Überspringt IPv6-Extension-Header bis zur Oberschicht."""
+    while payload:
+        if nexthdr in _V6_EXT and len(payload) >= 2:
+            ext_len = (payload[1] + 1) * 8
+        elif nexthdr == _V6_FRAGMENT and len(payload) >= 8:
+            ext_len = 8
+        else:
+            break
+        if ext_len > len(payload):
+            break
+        nexthdr = payload[0]
+        payload = payload[ext_len:]
+        offset += ext_len
+    return nexthdr, payload, offset
+
+
+def _dissect_icmpv6(data: bytes, offset: int, pkt: Packet) -> None:
+    if len(data) < 4:
+        pkt.info = "Verkürztes ICMPv6-Paket"
+        return
+    itype, code, csum = struct.unpack("!BBH", data[:4])
+    pkt.l4 = "ICMPv6"
+    pkt.protocol = "ICMPv6"
+    tname = _ICMPV6_TYPES.get(itype, f"Typ {itype}")
+    fields = [("Typ", f"{itype} ({tname})"), ("Code", str(code)),
+              ("Prüfsumme", f"0x{csum:04x}")]
+    info = tname
+    if itype in (128, 129) and len(data) >= 8:
+        ident, seq = struct.unpack("!HH", data[4:8])
+        fields += [("Identifier", str(ident)), ("Sequenz", str(seq))]
+        info = f"{tname} id={ident} seq={seq}"
+    pkt.layers.append(Layer("Internet Control Message Protocol v6",
+                            summary=tname, start=offset, length=len(data),
+                            fields=fields))
+    pkt.info = info
 
 
 def _dissect_tcp(data: bytes, offset: int, pkt: Packet) -> None:
@@ -229,23 +340,171 @@ def _app_layer(pkt: Packet, payload: bytes, offset: int) -> str:
         rectype = {0x14: "Change Cipher Spec", 0x15: "Alert",
                    0x16: "Handshake", 0x17: "Application Data"}[payload[0]]
         pkt.protocol = "TLS"
-        pkt.layers.append(Layer("Transport Layer Security",
-                                summary=rectype, start=offset, length=len(payload)))
-        return f"TLS {rectype} ({sport} → {dport})"
+        fields: list[tuple[str, str]] = []
+        summary = rectype
+        info_line = f"TLS {rectype} ({sport} → {dport})"
+        if payload[0] == 0x16:                       # Handshake genauer auswerten
+            hs = tls_info(payload)
+            if hs["type"]:
+                summary = hs["type"]
+                if hs["version"]:
+                    fields.append(("Version", hs["version"]))
+                fields.append(("Handshake-Typ", hs["type"]))
+                if hs["cipher"]:
+                    fields.append(("Cipher Suite", hs["cipher"]))
+                if hs["sni"]:
+                    pkt.domain = hs["sni"]
+                    fields.append(("Server-Name (SNI)", hs["sni"]))
+                    summary = f"{hs['type']} – {hs['sni']}"
+                detail = ", ".join(x for x in (hs["version"], hs["cipher"]) if x)
+                info_line = (f"TLS {hs['type']}"
+                             + (f" SNI={hs['sni']}" if hs["sni"] else "")
+                             + (f" [{detail}]" if detail else ""))
+        pkt.layers.append(Layer("Transport Layer Security", summary=summary,
+                                start=offset, length=len(payload), fields=fields))
+        return info_line
 
-    # HTTP: Anfrage-/Antwortzeile im Klartext
+    # HTTP: Anfrage-/Antwortzeile + Header im Klartext
     if app in ("HTTP", "HTTP-ALT", "HTTP-PROXY") and payload[:8].isascii():
-        line = payload.split(b"\r\n", 1)[0].decode("latin-1", "replace")[:120]
-        if line:
+        first, fields = _http_fields(payload)
+        if first:
             pkt.protocol = "HTTP"
+            host = next((v for k, v in fields if k.lower() == "host"), "")
+            if host:
+                pkt.domain = host
             pkt.layers.append(Layer("Hypertext Transfer Protocol",
-                                    summary=line, start=offset, length=len(payload)))
-            return f"HTTP {line}"
+                                    summary=first[:120], start=offset,
+                                    length=len(payload), fields=fields))
+            return f"HTTP {first[:120]}" + (f"  (Host: {host})" if host else "")
 
     if app and payload:
         pkt.protocol = app
         return f"{app} {sport} → {dport} Len={len(payload)}"
     return ""
+
+
+def _http_fields(payload: bytes) -> tuple[str, list[tuple[str, str]]]:
+    """Zerlegt eine HTTP-Anfrage/-Antwort in Startzeile + Header-Felder."""
+    head = payload[:4096].split(b"\r\n\r\n", 1)[0]
+    lines = head.split(b"\r\n")
+    first = lines[0].decode("latin-1", "replace")[:200]
+    if not first:
+        return "", []
+    fields: list[tuple[str, str]] = []
+    parts = first.split(" ")
+    if first.startswith("HTTP/"):                 # Antwort: HTTP/x.y CODE Grund
+        fields.append(("Typ", "Antwort"))
+        fields.append(("Version", parts[0]))
+        if len(parts) >= 2:
+            fields.append(("Status", " ".join(parts[1:])[:80]))
+    elif len(parts) >= 3:                          # Anfrage: METHODE PFAD VERSION
+        fields.append(("Typ", "Anfrage"))
+        fields.append(("Methode", parts[0]))
+        fields.append(("Pfad", parts[1][:200]))
+        fields.append(("Version", parts[2]))
+    for line in lines[1:]:
+        if b":" in line:
+            key, value = line.split(b":", 1)
+            fields.append((key.decode("latin-1", "replace").strip()[:60],
+                           value.decode("latin-1", "replace").strip()[:200]))
+        if len(fields) > 40:                       # gegen pathologisch lange Köpfe
+            break
+    return first, fields
+
+
+# Häufige TLS-Cipher-Suites (Auszug) und Versionsnamen.
+_TLS_CIPHERS = {
+    0x1301: "TLS_AES_128_GCM_SHA256", 0x1302: "TLS_AES_256_GCM_SHA384",
+    0x1303: "TLS_CHACHA20_POLY1305_SHA256",
+    0xC02B: "ECDHE_ECDSA_AES128_GCM_SHA256",
+    0xC02C: "ECDHE_ECDSA_AES256_GCM_SHA384",
+    0xC02F: "ECDHE_RSA_AES128_GCM_SHA256",
+    0xC030: "ECDHE_RSA_AES256_GCM_SHA384",
+    0xCCA8: "ECDHE_RSA_CHACHA20_POLY1305",
+    0xCCA9: "ECDHE_ECDSA_CHACHA20_POLY1305",
+}
+_TLS_VERSIONS = {0x0300: "SSL 3.0", 0x0301: "TLS 1.0", 0x0302: "TLS 1.1",
+                 0x0303: "TLS 1.2", 0x0304: "TLS 1.3"}
+
+
+def _is_grease(value: int) -> bool:
+    return (value & 0x0F0F) == 0x0A0A          # reservierte GREASE-Werte
+
+
+def tls_info(record: bytes) -> dict[str, str]:
+    """Liest aus einem TLS-Handshake-Record Typ, Version, Cipher und SNI.
+
+    Defensiv: liefert leere Strings bei Inkonsistenzen. ``record`` beginnt mit
+    dem 5-Byte-TLS-Record-Kopf. Für Client-/Server-Hello implementiert."""
+    out = {"type": "", "version": "", "cipher": "", "sni": ""}
+    if len(record) < 6 or record[0] != 0x16:
+        return out
+    htype = record[5]
+    out["type"] = {1: "Client Hello", 2: "Server Hello"}.get(
+        htype, f"Handshake {htype}")
+    if len(record) < 11:
+        return out
+    legacy = int.from_bytes(record[9:11], "big")
+    try:
+        pos = 5 + 4 + 2 + 32                    # Record+HS-Kopf, Version, Random
+        sid_len = record[pos]
+        pos += 1 + sid_len
+        if htype == 1:                          # ClientHello
+            cs_len = int.from_bytes(record[pos:pos + 2], "big")
+            pos += 2 + cs_len
+            comp_len = record[pos]
+            pos += 1 + comp_len
+        elif htype == 2:                        # ServerHello
+            out["cipher"] = _TLS_CIPHERS.get(
+                int.from_bytes(record[pos:pos + 2], "big"),
+                f"0x{int.from_bytes(record[pos:pos + 2], 'big'):04x}")
+            pos += 2 + 1                        # gewählte Cipher + Compression
+        best = legacy
+        if pos + 2 <= len(record):
+            ext_total = int.from_bytes(record[pos:pos + 2], "big")
+            pos += 2
+            end = min(len(record), pos + ext_total)
+            while pos + 4 <= end:
+                etype = int.from_bytes(record[pos:pos + 2], "big")
+                elen = int.from_bytes(record[pos + 2:pos + 4], "big")
+                pos += 4
+                data = record[pos:pos + elen]
+                if etype == 0x0000:
+                    out["sni"] = _parse_sni(data)
+                elif etype == 0x002B:           # supported_versions
+                    best = _parse_versions(data, htype) or best
+                pos += elen
+        out["version"] = _TLS_VERSIONS.get(best, f"0x{best:04x}")
+    except (IndexError, ValueError):
+        out["version"] = _TLS_VERSIONS.get(legacy, "")
+    return out
+
+
+def _tls_sni(record: bytes) -> str:
+    """Nur der SNI-Server-Name (Bequemlichkeits-Wrapper um :func:`tls_info`)."""
+    return tls_info(record)["sni"]
+
+
+def _parse_sni(data: bytes) -> str:
+    # server_name_list(2) | name_type(1=host_name? 0) | name_len(2) | name
+    if len(data) >= 5 and data[2] == 0x00:
+        nlen = int.from_bytes(data[3:5], "big")
+        return data[5:5 + nlen].decode("latin-1", "replace")[:255]
+    return ""
+
+
+def _parse_versions(data: bytes, htype: int) -> int:
+    if htype == 2:                              # ServerHello: gewählte Version
+        return int.from_bytes(data[:2], "big") if len(data) >= 2 else 0
+    if not data:                                # ClientHello: höchste angebotene
+        return 0
+    list_len = data[0]
+    best = 0
+    for i in range(1, min(1 + list_len, len(data) - 1), 2):
+        ver = int.from_bytes(data[i:i + 2], "big")
+        if not _is_grease(ver):
+            best = max(best, ver)
+    return best
 
 
 def _dissect_dns(payload: bytes, offset: int, pkt: Packet) -> str:
@@ -265,6 +524,8 @@ def _dissect_dns(payload: bytes, offset: int, pkt: Packet) -> str:
             qt, _qc = struct.unpack("!HH", payload[pos:pos + 4])
             qtype = _DNS_TYPES.get(qt, str(qt))
     kind = "response" if is_resp else "query"
+    if name:
+        pkt.domain = name
     summary = f"Standard {kind} 0x{ident:04x} {qtype} {name}".strip()
     pkt.layers.append(Layer("Domain Name System",
                             summary=summary, start=offset, length=len(payload),

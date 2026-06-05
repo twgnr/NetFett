@@ -39,11 +39,17 @@ class RawSocketCapture:
         if not hasattr(socket, "SIO_RCVALL"):
             raise CaptureError(
                 "SIO_RCVALL wird nur unter Windows unterstützt.")
+        is_v6 = ":" in self.host_ip
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_RAW,
-                                 socket.IPPROTO_IP)
-            sock.bind((self.host_ip, 0))
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+            if is_v6:
+                sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW,
+                                     socket.IPPROTO_IPV6)
+                sock.bind((self.host_ip, 0))
+            else:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_RAW,
+                                     socket.IPPROTO_IP)
+                sock.bind((self.host_ip, 0))
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
             sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_ON)
             sock.settimeout(1.0)
         except PermissionError as exc:

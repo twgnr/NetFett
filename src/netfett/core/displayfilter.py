@@ -162,5 +162,6 @@ def _make_text(value: str):
     def term(pkt: Packet) -> bool:
         return (needle in pkt.src.lower() or needle in pkt.dst.lower()
                 or needle in (pkt.info or "").lower()
-                or needle in (pkt.protocol or "").lower())
+                or needle in (pkt.protocol or "").lower()
+                or needle in (pkt.domain or "").lower())
     return term

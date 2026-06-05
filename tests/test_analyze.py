@@ -5,7 +5,8 @@ import socket
 import struct
 
 from netfett.core.analyze import (
-    SEV_ERROR, conversations, expert_info, follow_stream, tcp_segment,
+    SEV_ERROR, conversations, expert_info, follow_stream, io_buckets,
+    protocol_hierarchy, sequence, tcp_segment,
 )
 from netfett.core.dissect import dissect
 
@@ -136,6 +137,63 @@ def test_expert_info_detects_port_scan():
     f = expert_info(pkts, scan_port_threshold=15)
     scan = [x for x in f if x.category == "Security" and x.severity == SEV_ERROR]
     assert scan and "Port-Scan" in scan[0].summary
+
+
+def test_protocol_hierarchy_nests_by_layers():
+    # TCP/TLS-Paket und UDP/DNS-Paket teilen sich die IPv4-Wurzel.
+    tls = _pkt(1, "192.168.0.10", "1.1.1.1", 50000, 443, 0, 0x18,
+               b"\x16\x03\x01\x00")
+    dns_raw = _ip("192.168.0.10", "8.8.8.8", 17,
+                  struct.pack("!HHHH", 53, 53, 12, 0)
+                  + b"\x00\x01\x00\x00\x00\x00\x00\x00" + b"\x00" * 4)
+    dns = dissect(dns_raw, 1000.0, 2, LOCAL)
+    roots = protocol_hierarchy([tls, dns])
+    assert len(roots) == 1
+    ip = roots[0]
+    assert ip.name.startswith("Internet Protocol")
+    assert ip.packets == 2
+    kids = {n.name for n in ip.child_list()}
+    assert any("Transmission Control" in k for k in kids)
+    assert any("User Datagram" in k for k in kids)
+
+
+def test_protocol_hierarchy_empty():
+    assert protocol_hierarchy([]) == []
+
+
+def test_io_buckets_splits_by_direction_and_time():
+    pkts = [
+        _pkt(1, "192.168.0.10", "1.1.1.1", 50000, 443, 0, 0x18, b"x" * 100, ts=1000.0),
+        _pkt(2, "1.1.1.1", "192.168.0.10", 443, 50000, 0, 0x18, b"y" * 40, ts=1000.5),
+        _pkt(3, "192.168.0.10", "1.1.1.1", 50000, 443, 1, 0x18, b"z" * 60, ts=1002.0),
+    ]
+    a2b, b2a = io_buckets(pkts, "192.168.0.10", 50000, "1.1.1.1", 443, bucket=1.0)
+    assert len(a2b) == len(b2a) == 3            # 0..2 s → 3 Intervalle
+    assert a2b[0] == pkts[0].length             # 100-Byte-Paket in Bucket 0
+    assert b2a[0] == pkts[1].length             # 40-Byte-Antwort in Bucket 0
+    assert a2b[2] == pkts[2].length             # 60-Byte-Paket in Bucket 2
+
+
+def test_io_buckets_empty_for_unknown():
+    assert io_buckets([], "1.1.1.1", 1, "2.2.2.2", 2) == ([], [])
+
+
+def test_sequence_orders_and_assigns_client():
+    pkts = [
+        _pkt(1, "192.168.0.10", "1.1.1.1", 50000, 443, 0, 0x02, ts=1.0),   # SYN
+        _pkt(2, "1.1.1.1", "192.168.0.10", 443, 50000, 0, 0x12, ts=1.1),   # SYN/ACK
+        _pkt(3, "192.168.0.10", "1.1.1.1", 50000, 443, 1, 0x18, b"hi", ts=1.2),
+    ]
+    client, server, events = sequence(pkts, "192.168.0.10", 50000, "1.1.1.1", 443)
+    assert client == ("192.168.0.10", 50000)
+    assert server == ("1.1.1.1", 443)
+    assert [e.from_client for e in events] == [True, False, True]
+    assert "SYN" in events[0].label and "len=2" in events[2].label
+
+
+def test_sequence_empty_for_unknown():
+    _c, _s, events = sequence([], "1.1.1.1", 1, "2.2.2.2", 2)
+    assert events == []
 
 
 def test_expert_info_quiet_for_normal_traffic():

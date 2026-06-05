@@ -7,13 +7,16 @@ Das Fenster bleibt bewusst dünn – die eigentliche Arbeit steckt im ``core``-L
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QFont, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QSettings, QStringListModel, Qt, QTimer
+from PySide6.QtGui import (
+    QAction, QActionGroup, QColor, QFont, QGuiApplication, QKeySequence,
+    QTextCharFormat, QTextCursor,
+)
 from PySide6.QtWidgets import (
-    QComboBox, QDockWidget, QFileDialog, QHeaderView, QLabel, QLineEdit,
-    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QSplitter, QStatusBar,
-    QTableView, QTextEdit, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-    QWidget,
+    QComboBox, QCompleter, QDockWidget, QFileDialog, QHeaderView, QInputDialog,
+    QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+    QSplitter, QStatusBar, QTableView, QTextEdit, QToolBar, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..core.analyze import Conversation
@@ -21,14 +24,22 @@ from ..core.dissect import dissect
 from ..core.displayfilter import FilterError, compile_filter
 from ..core.interfaces import local_ipv4_addresses, primary_ipv4
 from ..core.models import Packet
-from ..core.pcap import read_pcap, write_pcap
+from ..core.export import (
+    export_conversations, export_domains, export_packets,
+)
+from ..core.pcap import read_pcap, write_pcap, write_pcapng
+from ..core.resolve import NameResolver
 from ..core.stats import Stats
 from .analysis_dialogs import (
-    ConversationsDialog, ExpertInfoDialog, FollowStreamDialog,
+    ConversationsDialog, DomainsDialog, ExpertInfoDialog, FollowStreamDialog,
+    ProtocolHierarchyDialog, TcpHealthDialog,
 )
 from .capture_controller import CaptureController
+from .charts import BarChart, DonutChart
 from .graph_widget import GraphWidget, human
-from .packet_model import _PROTO_BG, PacketModel
+from .packet_model import COLUMNS, _PROTO_BG, PacketModel
+from .theme import apply as apply_theme
+from .tools_dialogs import DnsLookupDialog, PingDialog, TracerouteDialog
 
 _MONO = QFont("Consolas", 9)
 
@@ -43,6 +54,11 @@ class MainWindow(QMainWindow):
         self.stats = Stats(window=60)
         self.controller = CaptureController(self)
         self._current_packet: Packet | None = None
+        self._find_term: str = ""
+        self.resolver = NameResolver()      # Reverse-DNS-Cache (geteilt)
+        self._name_timer = QTimer(self)     # pollt den Cache für die Namensspalte
+        self._name_timer.setInterval(400)
+        self._name_timer.timeout.connect(self._poll_names)
 
         self._build_menubar()
         self._build_toolbar()
@@ -62,6 +78,8 @@ class MainWindow(QMainWindow):
 
         self._populate_interfaces()
         self._refresh_graphs()
+        self._settings = QSettings("NetFett", "NetFett")
+        self._load_settings()
 
     # --- Aufbau ------------------------------------------------------------
     def _build_menubar(self) -> None:
@@ -72,6 +90,89 @@ class MainWindow(QMainWindow):
         act_exp = QAction("Experten-Infos…", self)
         act_exp.triggered.connect(self._show_expert_info)
         menu.addAction(act_exp)
+        act_health = QAction("TCP-Gesundheit…", self)
+        act_health.triggered.connect(self._show_tcp_health)
+        menu.addAction(act_health)
+        act_hier = QAction("Protokoll-Hierarchie…", self)
+        act_hier.triggered.connect(self._show_hierarchy)
+        menu.addAction(act_hier)
+        act_dom = QAction("Besuchte Domains…", self)
+        act_dom.triggered.connect(self._show_domains)
+        menu.addAction(act_dom)
+        menu.addSeparator()
+        act_find = QAction("Suchen…", self)
+        act_find.setShortcut(QKeySequence.Find)            # Strg+F
+        act_find.triggered.connect(self._find)
+        menu.addAction(act_find)
+        act_next = QAction("Weitersuchen", self)
+        act_next.setShortcut(QKeySequence(Qt.Key_F3))       # F3
+        act_next.triggered.connect(self._find_next)
+        menu.addAction(act_next)
+        menu.addSeparator()
+        exp = menu.addMenu("Exportieren")
+        for label, kind in (("Pakete…", "packets"),
+                            ("Verbindungen…", "conversations"),
+                            ("Domains…", "domains")):
+            a = QAction(label, self)
+            a.triggered.connect(lambda _c, k=kind: self._export(k))
+            exp.addAction(a)
+
+        tools_menu = self.menuBar().addMenu("&Werkzeuge")
+        for label, cls in (("Ping…", PingDialog),
+                          ("Traceroute…", TracerouteDialog),
+                          ("DNS-Lookup…", DnsLookupDialog)):
+            a = QAction(label, self)
+            a.triggered.connect(lambda _c, c=cls: c(self).exec())
+            tools_menu.addAction(a)
+
+        view = self.menuBar().addMenu("&Ansicht")
+        tmenu = view.addMenu("Zeitformat")
+        self._time_group = QActionGroup(self)
+        for label, mode in (("Relativ (seit Start)", "rel"),
+                            ("Uhrzeit (Tageszeit)", "tod"),
+                            ("Absolut (Epoch)", "abs")):
+            act = QAction(label, self, checkable=True)
+            act.setChecked(mode == self.model.time_mode)
+            act.triggered.connect(lambda _c, m=mode: self.model.set_time_mode(m))
+            self._time_group.addAction(act)
+            tmenu.addAction(act)
+
+        view.addSeparator()
+        act_mark = QAction("Markierung umschalten", self)
+        act_mark.setShortcut(QKeySequence("Ctrl+M"))
+        act_mark.triggered.connect(self._toggle_mark)
+        view.addAction(act_mark)
+        act_nmark = QAction("Nächste Markierung", self)
+        act_nmark.setShortcut(QKeySequence(Qt.Key_F8))
+        act_nmark.triggered.connect(self._next_mark)
+        view.addAction(act_nmark)
+        act_cmark = QAction("Alle Markierungen löschen", self)
+        act_cmark.triggered.connect(self._clear_marks)
+        view.addAction(act_cmark)
+        view.addSeparator()
+        self.act_names = QAction("Namensspalte (Reverse-DNS)", self,
+                                 checkable=True)
+        self.act_names.toggled.connect(self._toggle_name_column)
+        view.addAction(self.act_names)
+        view.addSeparator()
+        self.act_light = QAction("Helles Design", self, checkable=True)
+        self.act_light.toggled.connect(self._toggle_light)
+        view.addAction(self.act_light)
+        # Shortcuts auch ohne offenes Menü aktiv halten.
+        for a in (act_mark, act_nmark):
+            self.addAction(a)
+
+        cap = self.menuBar().addMenu("Auf&nahme")
+        self.act_record = QAction("Mitschnitt in Datei…", self, checkable=True)
+        self.act_record.setToolTip("Pakete live in eine PCAP-Datei schreiben")
+        self.act_record.toggled.connect(self._toggle_recording)
+        cap.addAction(self.act_record)
+        act_limit = QAction("Paketlimit (Ringpuffer)…", self)
+        act_limit.triggered.connect(self._set_packet_limit)
+        cap.addAction(act_limit)
+        act_capf = QAction("Aufnahme-Filter…", self)
+        act_capf.triggered.connect(self._set_capture_filter)
+        cap.addAction(act_capf)
 
     def _build_toolbar(self) -> None:
         tb = QToolBar("Steuerung", self)
@@ -124,6 +225,13 @@ class MainWindow(QMainWindow):
         self.filter_edit.setClearButtonEnabled(True)
         self.filter_edit.returnPressed.connect(self._apply_filter)
         self.filter_edit.textChanged.connect(self._on_filter_text)
+        # Filter-Historie: ▼-Taste zeigt zuletzt genutzte Filter.
+        self._filter_history: list[str] = []
+        self._filter_hist_model = QStringListModel(self)
+        completer = QCompleter(self._filter_hist_model, self)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
+        self.filter_edit.setCompleter(completer)
         tb.addWidget(self.filter_edit)
 
     def _build_central(self) -> None:
@@ -149,12 +257,22 @@ class MainWindow(QMainWindow):
         self.table.setShowGrid(False)
         self.table.setFont(_MONO)
         hh = self.table.horizontalHeader()
-        hh.setStretchLastSection(True)
+        hh.setStretchLastSection(False)
         for col, mode in {
             0: QHeaderView.ResizeToContents, 1: QHeaderView.ResizeToContents,
             5: QHeaderView.ResizeToContents, 6: QHeaderView.ResizeToContents,
+            7: QHeaderView.Stretch,                  # Info füllt den Rest
+            8: QHeaderView.ResizeToContents,         # Name (Reverse-DNS)
         }.items():
             hh.setSectionResizeMode(col, mode)
+        # Reverse-DNS-Spalte zunächst aus (Provider = Resolver-Cache).
+        self.model.set_name_provider(self.resolver.cached)
+        self.table.setColumnHidden(8, True)
+        # Sortierung per Spaltenkopf; Rechtsklick auf den Kopf blendet Spalten ein/aus.
+        self.table.setSortingEnabled(True)
+        hh.setSortIndicatorShown(True)
+        hh.setContextMenuPolicy(Qt.CustomContextMenu)
+        hh.customContextMenuRequested.connect(self._header_menu)
         self.table.selectionModel().currentRowChanged.connect(self._on_row)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._table_menu)
@@ -165,6 +283,8 @@ class MainWindow(QMainWindow):
         self.detail.setHeaderLabels(["Feld", "Wert"])
         self.detail.setFont(_MONO)
         self.detail.itemSelectionChanged.connect(self._on_detail_selection)
+        self.detail.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.detail.customContextMenuRequested.connect(self._detail_menu)
         bottom.addWidget(self.detail)
 
         self.hex = QPlainTextEdit(self)
@@ -191,6 +311,10 @@ class MainWindow(QMainWindow):
         lay.setSpacing(6)
 
         lay.addWidget(self._dock_caption("Protokolle (nach Volumen)"))
+        self.proto_donut = DonutChart("", "B", body)
+        self.proto_donut.setMinimumHeight(150)
+        self.proto_donut.sliceClicked.connect(self._filter_by_protocol)
+        lay.addWidget(self.proto_donut)
         self.proto_tree = QTreeWidget(body)
         self.proto_tree.setHeaderLabels(["Protokoll", "Pakete", "Bytes", "%"])
         self.proto_tree.setRootIsDecorated(False)
@@ -198,6 +322,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.proto_tree, 1)
 
         lay.addWidget(self._dock_caption("Top-Talkers (Quelle ⇄ Ziel)"))
+        self.talker_bars = BarChart("", "B", body)
+        self.talker_bars.setMinimumHeight(130)
+        lay.addWidget(self.talker_bars)
         self.talker_tree = QTreeWidget(body)
         self.talker_tree.setHeaderLabels(["Verbindung", "Pakete", "Bytes"])
         self.talker_tree.setRootIsDecorated(False)
@@ -216,6 +343,10 @@ class MainWindow(QMainWindow):
     def _on_dock_visibility(self, visible: bool) -> None:
         if visible:
             self._refresh_stats_panel()
+
+    def _filter_by_protocol(self, proto: str) -> None:
+        """Klick auf ein Donut-Segment/Legende → nach diesem Protokoll filtern."""
+        self._set_filter(proto.lower())
 
     @staticmethod
     def _dock_caption(text: str) -> QLabel:
@@ -265,6 +396,11 @@ class MainWindow(QMainWindow):
         self.act_stop.setEnabled(False)
         self.iface_combo.setEnabled(True)
         self._sec_timer.stop()
+        # Mitschnitt wurde vom Controller mit beendet → Menüpunkt enthaken.
+        if self.act_record.isChecked():
+            self.act_record.blockSignals(True)
+            self.act_record.setChecked(False)
+            self.act_record.blockSignals(False)
         self.lbl_state.setText("Gestoppt")
 
     def _on_error(self, msg: str) -> None:
@@ -283,6 +419,11 @@ class MainWindow(QMainWindow):
         self._update_counts()
         if self.act_follow.isChecked() and self.model.shown:
             self.table.scrollToBottom()
+        if self.act_names.isChecked():       # neue Gegenstellen mitauflösen
+            self.resolver.resolve_async(
+                {self.model._remote_ip(p) for p in batch if self.model._remote_ip(p)})
+            if not self._name_timer.isActive():
+                self._name_timer.start()
 
     def _on_second(self) -> None:
         self.stats.tick()
@@ -297,8 +438,10 @@ class MainWindow(QMainWindow):
         if not self._stats_dock.isVisible():
             return
         total = self.stats.total_bytes or 1
+        protos = self.stats.top_protocols(12)
+        self.proto_donut.set_data([(n, b) for n, _p, b in protos])
         self.proto_tree.clear()
-        for name, pkts, byts in self.stats.top_protocols(12):
+        for name, pkts, byts in protos:
             pct = f"{100 * byts / total:.1f}"
             it = QTreeWidgetItem([name, str(pkts), human(byts), pct])
             for col in (1, 2, 3):
@@ -310,8 +453,10 @@ class MainWindow(QMainWindow):
         for col in range(4):
             self.proto_tree.resizeColumnToContents(col)
 
+        talkers = self.stats.top_talkers(10)
+        self.talker_bars.set_data([(n, b) for n, _p, b in talkers])
         self.talker_tree.clear()
-        for name, pkts, byts in self.stats.top_talkers(10):
+        for name, pkts, byts in talkers:
             it = QTreeWidgetItem([name, str(pkts), human(byts)])
             for col in (1, 2):
                 it.setTextAlignment(col, int(Qt.AlignRight | Qt.AlignVCenter))
@@ -321,10 +466,14 @@ class MainWindow(QMainWindow):
     def _update_counts(self) -> None:
         total = self.stats.total_packets
         shown = self.model.shown
-        self.lbl_counts.setText(
-            f"Pakete: {shown}/{total}   "
-            f"▼ {human(self.stats.total_in_bytes)}   "
-            f"▲ {human(self.stats.total_out_bytes)}")
+        parts = [f"Pakete: {shown}/{total}"]
+        if self.model.max_packets:
+            parts.append(f"(Ring {self.model.max_packets})")
+        if self.controller.dropped:
+            parts.append(f"verworfen {self.controller.dropped}")
+        parts.append(f"▼ {human(self.stats.total_in_bytes)}")
+        parts.append(f"▲ {human(self.stats.total_out_bytes)}")
+        self.lbl_counts.setText("   ".join(parts))
 
     def _clear(self) -> None:
         self.model.clear()
@@ -333,6 +482,8 @@ class MainWindow(QMainWindow):
         self.hex.clear()
         self.proto_tree.clear()
         self.talker_tree.clear()
+        self.proto_donut.set_data([])
+        self.talker_bars.set_data([])
         self._current_packet = None
         self._refresh_graphs()
         self._update_counts()
@@ -347,15 +498,26 @@ class MainWindow(QMainWindow):
             self.filter_edit.setStyleSheet("background:#3a1414;")
 
     def _apply_filter(self) -> None:
+        text = self.filter_edit.text()
         try:
-            func = compile_filter(self.filter_edit.text())
+            func = compile_filter(text)
         except FilterError as exc:
             self.lbl_state.setText(f"Filterfehler: {exc}")
             return
         self.model.set_filter(func)
-        self.lbl_state.setText(
-            "Filter aktiv" if func else "Filter gelöscht")
+        self.lbl_state.setText("Filter aktiv" if func else "Filter gelöscht")
+        self._remember_filter(text)
         self._update_counts()
+
+    def _remember_filter(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        if text in self._filter_history:
+            self._filter_history.remove(text)
+        self._filter_history.insert(0, text)
+        del self._filter_history[20:]            # auf 20 Einträge begrenzen
+        self._filter_hist_model.setStringList(self._filter_history)
 
     # --- Auswahl: Detail-Baum + Hex ---------------------------------------
     def _on_row(self, current, _previous) -> None:
@@ -446,16 +608,35 @@ class MainWindow(QMainWindow):
         if not packets:
             QMessageBox.information(self, "NetFett", "Keine Pakete zum Speichern.")
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "PCAP speichern", "netfett.pcap", "PCAP-Dateien (*.pcap)")
+        # Bei aktivem Filter wählen lassen: alle oder nur angezeigte Pakete.
+        if self.model.shown < len(packets):
+            box = QMessageBox(self)
+            box.setWindowTitle("PCAP speichern")
+            box.setText(f"{self.model.shown} von {len(packets)} Paketen "
+                        f"sind durch den Filter sichtbar.")
+            box.setInformativeText("Welche Pakete sollen gespeichert werden?")
+            b_shown = box.addButton("Nur angezeigte", QMessageBox.AcceptRole)
+            box.addButton("Alle", QMessageBox.AcceptRole)
+            box.addButton(QMessageBox.Cancel)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is None or box.buttonRole(clicked) == QMessageBox.RejectRole:
+                return
+            if clicked is b_shown:
+                packets = self.model.view_packets
+        path, selected = QFileDialog.getSaveFileName(
+            self, "PCAP speichern", "netfett.pcap",
+            "PCAP (*.pcap);;PCAP-NG (*.pcapng)")
         if not path:
             return
+        ng = path.lower().endswith(".pcapng") or "pcapng" in selected.lower()
         try:
-            n = write_pcap(path, packets)
+            n = write_pcapng(path, packets) if ng else write_pcap(path, packets)
         except OSError as exc:
             QMessageBox.critical(self, "NetFett – Fehler", str(exc))
             return
-        self.lbl_state.setText(f"{n} Pakete gespeichert → {path}")
+        fmt = "PCAP-NG" if ng else "PCAP"
+        self.lbl_state.setText(f"{n} Pakete als {fmt} gespeichert → {path}")
 
     def _open_pcap(self) -> None:
         if self.controller.running:
@@ -487,7 +668,7 @@ class MainWindow(QMainWindow):
         if not pkts:
             QMessageBox.information(self, "NetFett", "Keine Pakete zum Analysieren.")
             return
-        dlg = ConversationsDialog(pkts, self)
+        dlg = ConversationsDialog(pkts, self, resolver=self.resolver)
         dlg.followRequested.connect(self._follow_stream)
         dlg.filterRequested.connect(self._set_filter)
         dlg.exec()
@@ -501,8 +682,179 @@ class MainWindow(QMainWindow):
         dlg.jumpToPacket.connect(self._jump_to_packet)
         dlg.exec()
 
+    def _show_tcp_health(self) -> None:
+        pkts = self.model.all_packets
+        if not pkts:
+            QMessageBox.information(self, "NetFett", "Keine Pakete zum Analysieren.")
+            return
+        TcpHealthDialog(pkts, self).exec()
+
+    def _show_hierarchy(self) -> None:
+        pkts = self.model.all_packets
+        if not pkts:
+            QMessageBox.information(self, "NetFett", "Keine Pakete zum Analysieren.")
+            return
+        ProtocolHierarchyDialog(pkts, self).exec()
+
+    def _show_domains(self) -> None:
+        pkts = self.model.all_packets
+        if not pkts:
+            QMessageBox.information(self, "NetFett", "Keine Pakete zum Analysieren.")
+            return
+        dlg = DomainsDialog(pkts, self)
+        dlg.filterRequested.connect(self._set_filter)
+        dlg.exec()
+
     def _follow_stream(self, conv: Conversation) -> None:
         FollowStreamDialog(self.model.all_packets, conv, self).exec()
+
+    def _export(self, kind: str) -> None:
+        pkts = self.model.all_packets
+        if not pkts:
+            QMessageBox.information(self, "NetFett", "Keine Pakete zum Export.")
+            return
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Exportieren", f"netfett-{kind}.csv",
+            "CSV-Dateien (*.csv);;JSON-Dateien (*.json)")
+        if not path:
+            return
+        fmt = "json" if path.lower().endswith(".json") \
+            or "json" in selected.lower() else "csv"
+        builder = {"packets": export_packets,
+                   "conversations": export_conversations,
+                   "domains": export_domains}[kind]
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(builder(pkts, fmt))
+        except OSError as exc:
+            QMessageBox.critical(self, "NetFett – Fehler", str(exc))
+            return
+        self.lbl_state.setText(f"Export ({fmt.upper()}) → {path}")
+
+    # --- Suche -------------------------------------------------------------
+    def _find(self) -> None:
+        term, ok = QInputDialog.getText(
+            self, "Suchen", "Begriff (Quelle/Ziel/Protokoll/Info):",
+            text=self._find_term)
+        if ok and term:
+            self._find_term = term
+            self._find_from(self.table.currentIndex().row() + 1)
+
+    def _find_next(self) -> None:
+        if self._find_term:
+            self._find_from(self.table.currentIndex().row() + 1)
+        else:
+            self._find()
+
+    # --- Markierungen ------------------------------------------------------
+    def _toggle_mark(self) -> None:
+        row = self.table.currentIndex().row()
+        if row < 0:
+            return
+        self.model.toggle_mark(row)
+        self.lbl_state.setText(f"{self.model.marked_count} Paket(e) markiert")
+
+    def _next_mark(self) -> None:
+        row = self.model.next_marked_row(self.table.currentIndex().row() + 1)
+        if row < 0:
+            self.lbl_state.setText("Keine Markierungen.")
+            return
+        idx = self.model.index(row, 0)
+        self.table.setCurrentIndex(idx)
+        self.table.scrollTo(idx, QTableView.PositionAtCenter)
+
+    def _clear_marks(self) -> None:
+        self.model.clear_marks()
+        self.lbl_state.setText("Markierungen gelöscht.")
+
+    # --- Reverse-DNS-Spalte ------------------------------------------------
+    def _toggle_name_column(self, on: bool) -> None:
+        self.table.setColumnHidden(self.model.columnCount() - 1, not on)
+        if on:
+            ips = self.model.remote_ips()
+            self.resolver.resolve_async(ips)
+            self._name_timer.start()
+            self.model.refresh_names()
+            self.lbl_state.setText(f"Löse {len(ips)} Hosts auf (Reverse-DNS) …")
+        else:
+            self._name_timer.stop()
+
+    def _poll_names(self) -> None:
+        self.model.refresh_names()
+        if self.resolver.pending == 0:
+            self._name_timer.stop()
+            self.lbl_state.setText("Namensauflösung abgeschlossen.")
+
+    def _toggle_light(self, light: bool) -> None:
+        """Schaltet zwischen hellem und dunklem Design um."""
+        from PySide6.QtWidgets import QApplication
+        apply_theme(QApplication.instance(), dark=not light)
+        for wdg in (self.graph_bps, self.graph_pps,
+                    self.proto_donut, self.talker_bars):
+            wdg.update()
+        self.table.viewport().update()      # Zeilenfarben neu zeichnen
+
+    # --- Langzeit-Erfassung (Mitschnitt / Ringpuffer / Aufnahme-Filter) ----
+    def _toggle_recording(self, on: bool) -> None:
+        if on:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Live-Mitschnitt", "netfett-live.pcap",
+                "PCAP-Dateien (*.pcap)")
+            if not path:
+                self.act_record.setChecked(False)   # Auswahl abgebrochen
+                return
+            self.controller.start_recording(path)
+            self._record_path = path
+            self.lbl_state.setText(f"Mitschnitt läuft → {path}")
+        else:
+            count = self.controller.stop_recording()
+            self.lbl_state.setText(f"Mitschnitt beendet ({count} Pakete)")
+
+    def _set_packet_limit(self) -> None:
+        n, ok = QInputDialog.getInt(
+            self, "Paketlimit",
+            "Max. Pakete im Speicher (0 = unbegrenzt):",
+            self.model.max_packets, 0, 100_000_000, 1000)
+        if not ok:
+            return
+        self.model.set_max_packets(n)
+        self.lbl_state.setText(
+            f"Ringpuffer: {n} Pakete" if n else "Ringpuffer: unbegrenzt")
+        self._update_counts()
+
+    def _set_capture_filter(self) -> None:
+        text, ok = QInputDialog.getText(
+            self, "Aufnahme-Filter",
+            "Nur passende Pakete aufnehmen (gleiche Syntax wie Anzeigefilter):",
+            text=getattr(self, "_capture_filter_text", ""))
+        if not ok:
+            return
+        try:
+            func = compile_filter(text)
+        except FilterError as exc:
+            QMessageBox.warning(self, "NetFett", f"Filterfehler: {exc}")
+            return
+        self._capture_filter_text = text
+        self.controller.set_capture_filter(func)
+        self.lbl_state.setText(
+            "Aufnahme-Filter aktiv" if func else "Aufnahme-Filter gelöscht")
+
+    def _find_from(self, start: int) -> None:
+        n = self.model.shown
+        if n == 0:
+            return
+        term = self._find_term.lower()
+        start = max(0, start)
+        order = list(range(start, n)) + list(range(0, start))  # mit Umlauf
+        for row in order:
+            pkt = self.model.packet_at(row)
+            if pkt is not None and _pkt_matches(pkt, term):
+                idx = self.model.index(row, 0)
+                self.table.setCurrentIndex(idx)
+                self.table.scrollTo(idx, QTableView.PositionAtCenter)
+                self.lbl_state.setText(f"Treffer: Zeile {row + 1} (F3 = weiter)")
+                return
+        self.lbl_state.setText(f"Kein Treffer für „{self._find_term}“.")
 
     def _set_filter(self, text: str) -> None:
         self.filter_edit.setText(text)
@@ -544,11 +896,100 @@ class MainWindow(QMainWindow):
                 lambda: self._set_filter(f"port {pkt.dst_port}"))
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
+    def _header_menu(self, pos) -> None:
+        menu = QMenu(self)
+        menu.addAction("Spalten anzeigen:").setEnabled(False)
+        menu.addSeparator()
+        for col in range(self.model.columnCount()):
+            act = menu.addAction(COLUMNS[col])
+            act.setCheckable(True)
+            act.setChecked(not self.table.isColumnHidden(col))
+            act.toggled.connect(
+                lambda on, c=col: self.table.setColumnHidden(c, not on))
+        menu.exec(self.table.horizontalHeader().mapToGlobal(pos))
+
+    def _detail_menu(self, pos) -> None:
+        item = self.detail.itemAt(pos)
+        if item is None:
+            return
+        label = item.text(0)
+        value = item.text(1)
+        menu = QMenu(self)
+        if value:
+            menu.addAction("Wert kopieren").triggered.connect(
+                lambda: QGuiApplication.clipboard().setText(value))
+        menu.addAction("Feld kopieren").triggered.connect(
+            lambda: QGuiApplication.clipboard().setText(
+                f"{label}: {value}".strip(": ")))
+        flt = _field_filter(label, value)
+        if flt:
+            menu.addSeparator()
+            menu.addAction(f"Als Filter: {flt}").triggered.connect(
+                lambda: self._set_filter(flt))
+        menu.exec(self.detail.viewport().mapToGlobal(pos))
+
+    # --- Einstellungen (persistent über QSettings) -------------------------
+    def _load_settings(self) -> None:
+        s = self._settings
+        geo = s.value("ui/geometry")
+        if geo is not None:
+            self.restoreGeometry(geo)
+        if s.value("ui/light", False, type=bool):
+            self.act_light.setChecked(True)
+        if not s.value("ui/autoScroll", True, type=bool):
+            self.act_follow.setChecked(False)
+        if not s.value("ui/statsDock", True, type=bool):
+            self.act_stats.setChecked(False)
+        if s.value("ui/nameColumn", False, type=bool):
+            self.act_names.setChecked(True)
+        limit = s.value("capture/maxPackets", 0, type=int)
+        if limit:
+            self.model.set_max_packets(limit)
+        flt = s.value("capture/filter", "", type=str)
+        if flt:
+            try:
+                self.controller.set_capture_filter(compile_filter(flt))
+                self._capture_filter_text = flt
+            except FilterError:
+                pass
+
+    def _save_settings(self) -> None:
+        s = self._settings
+        s.setValue("ui/geometry", self.saveGeometry())
+        s.setValue("ui/light", self.act_light.isChecked())
+        s.setValue("ui/autoScroll", self.act_follow.isChecked())
+        s.setValue("ui/statsDock", self.act_stats.isChecked())
+        s.setValue("ui/nameColumn", self.act_names.isChecked())
+        s.setValue("capture/maxPackets", self.model.max_packets)
+        s.setValue("capture/filter", getattr(self, "_capture_filter_text", ""))
+
     # --- Lebenszyklus ------------------------------------------------------
     def closeEvent(self, event) -> None:
+        self._save_settings()
         if self.controller.running:
             self.controller.stop()
         super().closeEvent(event)
+
+
+def _field_filter(label: str, value: str) -> str:
+    """Baut aus einem Detail-Feld einen Anzeigefilter (oder leer)."""
+    value = value.strip()
+    if not value:
+        return ""
+    if label in ("Quelle", "Ziel"):
+        return f"host {value}"
+    if label == "Quell-Port":
+        return f"src port {value}"
+    if label == "Ziel-Port":
+        return f"dst port {value}"
+    return ""
+
+
+def _pkt_matches(pkt: Packet, needle: str) -> bool:
+    """Teilstring-Treffer in Quelle/Ziel/Protokoll/Info/Ports (für die Suche)."""
+    hay = (f"{pkt.src} {pkt.dst} {pkt.protocol} {pkt.info} "
+           f"{pkt.src_port or ''} {pkt.dst_port or ''}").lower()
+    return needle in hay
 
 
 def _hexdump(raw: bytes) -> str:
