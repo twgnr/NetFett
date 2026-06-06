@@ -1,6 +1,6 @@
 # NetFett
 
-**NetFett** ist ein schlanker, Wireshark-ähnlicher Netzwerk-Monitor in **reinem
+**NetFett** ist ein vollwertiger Netzwerk-Monitor und Protokoll-Analyzer in **reinem
 Python** mit **PySide6**-Oberfläche. Er erfasst ein- und ausgehenden IPv4-/IPv6-
 Verkehr über einen Windows-Raw-Socket (`SIO_RCVALL`) – **ohne Npcap/WinPcap**.
 Abhängigkeiten: **PySide6** (GUI) und **cryptography** (nur für die optionale
@@ -15,7 +15,7 @@ TLS-Entschlüsselung); die gesamte Analyse-Logik kommt ohne Fremd-Deps aus.
 **Erfassung & Anzeige**
 - Live-Mitschnitt allen IPv4-Verkehrs einer Schnittstelle (ein-/ausgehend)
 - Paketliste mit Nr., Zeit, Quelle/Ziel (inkl. Port), Protokoll, Länge,
-  Richtung (▲ aus / ▼ ein) und Wireshark-ähnlicher Info-Zeile
+  Richtung (▲ aus / ▼ ein) und kompakter Info-Zeile
 - Schicht-Detailansicht (Baum) und – umschaltbar per Reiter – **Hex** oder
   **Inhalt**: die tatsächlichen Nutzdaten als **Klartext** (unverschlüsselt)
   bzw. als **Bytes/Hex** (verschlüsselt, z. B. TLS), mit Richtungsangabe
@@ -304,9 +304,9 @@ Kategorien, Coloring/IOC, Objekt-Extraktion und den Headless-Modus ab.
   live erfasst; Nicht-IP-Protokolle (z. B. ARP) liefert der Raw-Socket nicht.
 - Erfordert **Administratorrechte** für die Erfassung.
 - Der Dissector deckt die wichtigsten Protokolle ab (inkl. HTTP/2, SMB, SIP,
-  RTP), ist aber bewusst **leichtgewichtig** – keine vollständige
-  Wireshark-Abdeckung. HTTP/2 nur im Klartext (h2c); über TLS erst nach
-  Entschlüsselung. RTP-Erkennung ist heuristisch (keine festen Ports).
+  RTP), erhebt aber keinen Anspruch auf lückenlose Vollständigkeit. HTTP/2 nur im
+  Klartext (h2c); über TLS erst nach Entschlüsselung. RTP-Erkennung ist
+  heuristisch (keine festen Ports).
 
 ## Lizenz
 

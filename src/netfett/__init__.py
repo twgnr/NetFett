@@ -1,4 +1,4 @@
-"""NetFett – ein Wireshark-ähnlicher Netzwerk-Monitor (PySide6, reines Python).
+"""NetFett – ein vollwertiger Netzwerk-Monitor und Protokoll-Analyzer (PySide6, reines Python).
 
 Erfasst ein- und ausgehenden IPv4-Verkehr über einen Windows-Raw-Socket
 (``SIO_RCVALL``) – ohne Npcap/WinPcap und ohne Fremd-Dependencies. Bietet eine
