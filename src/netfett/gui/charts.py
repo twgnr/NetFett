@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 
-from PySide6.QtCore import QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -235,6 +235,75 @@ class BarChart(QWidget):
                        int(Qt.AlignLeft | Qt.AlignVCenter), vtext)
             y += row_h
         p.end()
+
+
+class MultiLineChart(QWidget):
+    """Mehrere Zeitreihen als farbige Linien mit Legende (z. B. je Programm)."""
+
+    def __init__(self, title: str = "", unit: str = "B/s", parent=None) -> None:
+        super().__init__(parent)
+        self._title = title
+        self._unit = unit
+        self._series: dict[str, list[int]] = {}
+        self.setMinimumHeight(120)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+
+    def set_series(self, series: dict) -> None:
+        self._series = {k: list(v) for k, v in series.items()}
+        self.update()
+
+    @staticmethod
+    def _color(label: str) -> QColor:
+        # Deterministische Farbe je Label (stabil innerhalb der Sitzung).
+        return QColor(PALETTE[sum(label.encode()) % len(PALETTE)])
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(self.rect(), _bg())
+
+        pad_t = 18 if self._title else 6
+        if self._title:
+            p.setFont(QFont("Segoe UI", 8, QFont.Bold))
+            p.setPen(_text())
+            p.drawText(8, 13, self._title)
+
+        gx, gy = 8, pad_t
+        gw, gh = max(1, w - 16), max(1, h - pad_t - 6)
+        peak = max([1, *(v for vals in self._series.values() for v in vals)])
+
+        grid = QColor(THEME.grid)
+        p.setFont(QFont("Segoe UI", 7))
+        for frac in (0.0, 0.5, 1.0):
+            y = gy + gh - gh * frac
+            p.setPen(QPen(grid, 1))
+            p.drawLine(int(gx), int(y), int(gx + gw), int(y))
+            p.setPen(_muted())
+            p.drawText(int(gx + 2), int(y - 2), human(peak * frac, self._unit))
+
+        legend_y = pad_t
+        for label, vals in self._series.items():
+            color = self._color(label)
+            if len(vals) >= 2:
+                step = gw / (len(vals) - 1)
+                pts = [QPointF(gx + i * step, gy + gh - (v / peak) * gh)
+                       for i, v in enumerate(vals)]
+                p.setPen(QPen(color, 1.5))
+                for a, b in zip(pts, pts[1:]):
+                    p.drawLine(a, b)
+            # Legende rechts oben.
+            text = _elide_str(label, 18)
+            p.fillRect(w - 130, legend_y, 8, 8, color)
+            p.setPen(_text())
+            p.setFont(QFont("Segoe UI", 7))
+            p.drawText(w - 118, legend_y + 8, text)
+            legend_y += 13
+        p.end()
+
+
+def _elide_str(text: str, n: int) -> str:
+    return text if len(text) <= n else text[:n - 1] + "…"
 
 
 def _elide(p: QPainter, text: str, width: int) -> str:

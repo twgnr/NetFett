@@ -15,10 +15,12 @@ die Rohbytes ab IPv4-Kopf; das Paketmodell bleibt unverändert.
 from __future__ import annotations
 
 import base64
+import socket
 import struct
 from dataclasses import dataclass, field
 
-from .models import Packet
+from .ipinfo import is_public
+from .models import DIR_OUT, Packet
 
 # TCP-Flag-Bits.
 FIN, SYN, RST, PSH, ACK = 0x01, 0x02, 0x04, 0x08, 0x10
@@ -437,6 +439,12 @@ def expert_info(packets: list[Packet], scan_port_threshold: int = 15,
 
     findings.extend(beaconing(packets))
     findings.extend(credentials(packets))
+    findings.extend(dns_tunneling(packets))
+    findings.extend(exfiltration(packets))
+    for ts, ip, domain in first_contacts(packets)[:15]:
+        label = f"{ip} ({domain})" if domain else ip
+        findings.append(Finding(SEV_INFO, "Erstkontakt",
+                                f"Erster Kontakt: {label}"))
     return findings
 
 
@@ -596,3 +604,688 @@ def credentials(packets: list[Packet]) -> list[Finding]:
                     f"FTP-{kind} im Klartext: {value} ({pkt.src} → {pkt.dst})",
                     pkt.number))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Transport-Payload-Helfer (für DNS-Analyse; IPv4/IPv6 ohne Ext-Header)
+# --------------------------------------------------------------------------- #
+def _udp_payload(raw: bytes) -> bytes | None:
+    if len(raw) < 1:
+        return None
+    version = raw[0] >> 4
+    if version == 4:
+        if len(raw) < 20 or raw[9] != 17:
+            return None
+        ihl = max(20, min((raw[0] & 0x0F) * 4, len(raw)))
+        l4 = raw[ihl:]
+    elif version == 6:
+        if len(raw) < 40 or raw[6] != 17:        # ohne Ext-Header (für DNS ok)
+            return None
+        l4 = raw[40:]
+    else:
+        return None
+    return l4[8:] if len(l4) >= 8 else None
+
+
+# --------------------------------------------------------------------------- #
+# DNS-Tiefenanalyse
+# --------------------------------------------------------------------------- #
+_DNS_TYPE = {1: "A", 2: "NS", 5: "CNAME", 6: "SOA", 12: "PTR", 15: "MX",
+             16: "TXT", 28: "AAAA", 33: "SRV", 65: "HTTPS", 255: "ANY"}
+
+
+@dataclass(slots=True)
+class DnsMessage:
+    is_response: bool
+    txid: int
+    rcode: int
+    qname: str
+    qtype: str
+    answers: list[tuple[str, str]]    # (Typ, Wert)
+
+
+@dataclass(slots=True)
+class DnsStat:
+    name: str
+    qtype: str
+    queries: int
+    responses: int
+    nxdomain: int
+    avg_ms: float | None
+    addresses: tuple[str, ...]
+
+
+def _dns_name(buf: bytes, pos: int, depth: int = 0) -> tuple[str, int]:
+    labels: list[str] = []
+    jumped = False
+    end = pos
+    while depth < 12 and 0 <= pos < len(buf):
+        length = buf[pos]
+        if length == 0:
+            pos += 1
+            if not jumped:
+                end = pos
+            break
+        if length & 0xC0 == 0xC0:
+            if pos + 1 >= len(buf):
+                break
+            ptr = ((length & 0x3F) << 8) | buf[pos + 1]
+            if not jumped:
+                end = pos + 2
+            jumped = True
+            pos = ptr
+            depth += 1
+            continue
+        pos += 1
+        labels.append(buf[pos:pos + length].decode("latin-1", "replace"))
+        pos += length
+        if not jumped:
+            end = pos
+    return ".".join(labels), end
+
+
+def parse_dns(payload: bytes) -> DnsMessage | None:
+    if len(payload) < 12:
+        return None
+    try:
+        txid, flags, qd, an, _ns, _ar = struct.unpack("!HHHHHH", payload[:12])
+    except struct.error:
+        return None
+    is_resp = bool(flags & 0x8000)
+    rcode = flags & 0x000F
+    if qd < 1:
+        return None
+    qname, pos = _dns_name(payload, 12)
+    if pos + 4 > len(payload):
+        return None
+    qtype_num, _qclass = struct.unpack("!HH", payload[pos:pos + 4])
+    pos += 4
+    answers: list[tuple[str, str]] = []
+    for _ in range(an):
+        if pos + 1 > len(payload):
+            break
+        _name, pos = _dns_name(payload, pos)
+        if pos + 10 > len(payload):
+            break
+        atype, _aclass, _ttl, rdlen = struct.unpack("!HHIH", payload[pos:pos + 10])
+        pos += 10
+        rdata = payload[pos:pos + rdlen]
+        if atype == 1 and len(rdata) == 4:
+            answers.append(("A", socket.inet_ntoa(rdata)))
+        elif atype == 28 and len(rdata) == 16:
+            answers.append(("AAAA", socket.inet_ntop(socket.AF_INET6, rdata)))
+        elif atype == 5:
+            cname, _ = _dns_name(payload, pos)
+            answers.append(("CNAME", cname))
+        pos += rdlen
+    return DnsMessage(is_resp, txid, rcode, qname,
+                      _DNS_TYPE.get(qtype_num, str(qtype_num)), answers)
+
+
+def dns_analysis(packets: list[Packet]) -> list[DnsStat]:
+    """Korreliert DNS-Anfragen/-Antworten und aggregiert je Name.
+
+    Liefert je (Name, Typ): Anzahl Anfragen/Antworten, NXDOMAIN, mittlere
+    Antwortzeit (ms) und gefundene A/AAAA/CNAME-Werte."""
+    pending: dict[tuple, float] = {}                 # (txid, name) -> Anfrage-ts
+    agg: dict[tuple, dict] = {}
+    for pkt in packets:
+        if pkt.src_port not in (53, 5353) and pkt.dst_port not in (53, 5353):
+            continue
+        payload = _udp_payload(pkt.raw)
+        if payload is None:
+            continue
+        msg = parse_dns(payload)
+        if msg is None:
+            continue
+        key = (msg.qname.lower(), msg.qtype)
+        a = agg.setdefault(key, {"name": msg.qname, "qtype": msg.qtype,
+                                 "q": 0, "r": 0, "nx": 0, "rts": [],
+                                 "addrs": []})
+        if not msg.is_response:
+            a["q"] += 1
+            pending[(msg.txid, msg.qname.lower())] = pkt.ts
+        else:
+            a["r"] += 1
+            if msg.rcode == 3:
+                a["nx"] += 1
+            for _atype, value in msg.answers:
+                if value not in a["addrs"]:
+                    a["addrs"].append(value)
+            t0 = pending.pop((msg.txid, msg.qname.lower()), None)
+            if t0 is not None:
+                a["rts"].append((pkt.ts - t0) * 1000.0)
+    out = []
+    for a in agg.values():
+        avg = sum(a["rts"]) / len(a["rts"]) if a["rts"] else None
+        out.append(DnsStat(a["name"], a["qtype"], a["q"], a["r"], a["nx"],
+                           avg, tuple(a["addrs"][:8])))
+    out.sort(key=lambda d: (d.queries + d.responses), reverse=True)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Endpunkt- & Port-Statistik
+# --------------------------------------------------------------------------- #
+@dataclass(slots=True)
+class EndpointStat:
+    ip: str
+    tx_pkts: int = 0
+    tx_bytes: int = 0
+    rx_pkts: int = 0
+    rx_bytes: int = 0
+
+    @property
+    def packets(self) -> int:
+        return self.tx_pkts + self.rx_pkts
+
+    @property
+    def bytes(self) -> int:
+        return self.tx_bytes + self.rx_bytes
+
+
+def endpoints(packets: list[Packet]) -> list[EndpointStat]:
+    """Aggregiert Volumen je einzelner Host-IP (gesendet/empfangen)."""
+    table: dict[str, EndpointStat] = {}
+    for pkt in packets:
+        if pkt.src:
+            e = table.setdefault(pkt.src, EndpointStat(pkt.src))
+            e.tx_pkts += 1
+            e.tx_bytes += pkt.length
+        if pkt.dst:
+            e = table.setdefault(pkt.dst, EndpointStat(pkt.dst))
+            e.rx_pkts += 1
+            e.rx_bytes += pkt.length
+    return sorted(table.values(), key=lambda e: e.bytes, reverse=True)
+
+
+@dataclass(slots=True)
+class PortStat:
+    port: int
+    service: str
+    proto: str
+    packets: int
+    bytes: int
+
+
+def port_stats(packets: list[Packet]) -> list[PortStat]:
+    """Top-Dienst-Ports (der „bekannte" Port je TCP/UDP-Paket), nach Volumen."""
+    from . import protocols as _P
+    table: dict[tuple, list] = {}
+    for pkt in packets:
+        if pkt.l4 not in ("TCP", "UDP"):
+            continue
+        sp, dp = pkt.src_port, pkt.dst_port
+        if sp is None or dp is None:
+            continue
+        if _P.port_app(dp):
+            port = dp
+        elif _P.port_app(sp):
+            port = sp
+        else:
+            port = min(sp, dp)
+        key = (port, pkt.l4)
+        row = table.setdefault(key, [0, 0])
+        row[0] += 1
+        row[1] += pkt.length
+    out = [PortStat(port, _P.port_app(port) or "?", proto, c[0], c[1])
+           for (port, proto), c in table.items()]
+    out.sort(key=lambda p: p.bytes, reverse=True)
+    return out
+
+
+def size_histogram(packets: list[Packet]) -> list[tuple[str, int]]:
+    """Verteilung der Paketgrößen in festen Größenklassen."""
+    bounds = [64, 128, 256, 512, 1024, 1280, 1518]
+    labels = ["≤64", "65–128", "129–256", "257–512", "513–1024",
+              "1025–1280", "1281–1518", ">1518"]
+    counts = [0] * len(labels)
+    for pkt in packets:
+        for i, b in enumerate(bounds):
+            if pkt.length <= b:
+                counts[i] += 1
+                break
+        else:
+            counts[-1] += 1
+    return [(labels[i], counts[i]) for i in range(len(labels)) if counts[i]]
+
+
+# --------------------------------------------------------------------------- #
+# Verbindungs-Lebenszyklus (TCP-Zustand je Flow)
+# --------------------------------------------------------------------------- #
+@dataclass(slots=True)
+class ConnState:
+    a: str
+    a_port: int | None
+    b: str
+    b_port: int | None
+    state: str
+    setup_ms: float | None      # Handshake-Zeit (SYN → SYN/ACK)
+    duration: float
+    packets: int
+
+
+def connection_states(packets: list[Packet]) -> list[ConnState]:
+    """Klassifiziert jede TCP-Verbindung nach ihrem Lebenszyklus-Zustand."""
+    acc: dict[tuple, dict] = {}
+    for pkt in packets:
+        if pkt.l4 != "TCP":
+            continue
+        seg = tcp_segment(pkt.raw)
+        if seg is None:
+            continue
+        flags = seg[2]
+        _l4, a, b = _conv_key(pkt)
+        d = acc.get((a, b))
+        if d is None:
+            d = {"a": a, "b": b, "syn": None, "synack": None, "data": False,
+                 "fin": 0, "rst": False, "first": pkt.ts, "last": pkt.ts,
+                 "pkts": 0}
+            acc[(a, b)] = d
+        d["pkts"] += 1
+        d["first"] = min(d["first"], pkt.ts)
+        d["last"] = max(d["last"], pkt.ts)
+        if (flags & SYN) and not (flags & ACK):
+            if d["syn"] is None:
+                d["syn"] = pkt.ts
+        elif (flags & SYN) and (flags & ACK):
+            if d["synack"] is None:
+                d["synack"] = pkt.ts
+        if flags & RST:
+            d["rst"] = True
+        if flags & FIN:
+            d["fin"] += 1
+        if len(seg[3]) > 0:
+            d["data"] = True
+    out = []
+    for d in acc.values():
+        if d["rst"]:
+            state = "Zurückgesetzt (RST)"
+        elif d["fin"] >= 1:
+            state = "Geschlossen (FIN)"
+        elif d["data"] and d["synack"]:
+            state = "Aktiv (established)"
+        elif d["syn"] and d["synack"]:
+            state = "Aufbau (SYN/ACK)"
+        elif d["syn"] and not d["synack"]:
+            state = "Fehlgeschlagen (keine Antwort)"
+        else:
+            state = "Unvollständig"
+        setup = ((d["synack"] - d["syn"]) * 1000.0
+                 if d["syn"] and d["synack"] else None)
+        (a_ip, a_port), (b_ip, b_port) = d["a"], d["b"]
+        out.append(ConnState(a_ip, a_port, b_ip, b_port, state, setup,
+                             max(0.0, d["last"] - d["first"]), d["pkts"]))
+    out.sort(key=lambda c: c.packets, reverse=True)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Globaler IO-Verlauf (mehrere Filter-Linien)
+# --------------------------------------------------------------------------- #
+def io_timeline(packets: list[Packet], predicates: list,
+                bucket: float = 1.0, by_packets: bool = False
+                ) -> tuple[int, list[list[int]]]:
+    """Bytes (oder Pakete) je Zeitintervall für mehrere Filter-Prädikate.
+
+    ``predicates`` ist eine Liste von ``Packet -> bool`` (oder ``None`` = alles).
+    Liefert (Anzahl Buckets, Liste gleich langer Reihen – eine je Prädikat)."""
+    series = [[] for _ in predicates]
+    if not packets or not predicates:
+        return 0, series
+    t0 = min(p.ts for p in packets)
+    t1 = max(p.ts for p in packets)
+    n = max(1, int((t1 - t0) / bucket) + 1)
+    series = [[0] * n for _ in predicates]
+    for p in packets:
+        idx = min(n - 1, int((p.ts - t0) / bucket))
+        val = 1 if by_packets else p.length
+        for i, pred in enumerate(predicates):
+            if pred is None or pred(p):
+                series[i][idx] += val
+    return n, series
+
+
+# --------------------------------------------------------------------------- #
+# Netzwerk-Topologie (Knoten = Hosts, Kanten = Verbindungen)
+# --------------------------------------------------------------------------- #
+@dataclass(slots=True)
+class TopoNode:
+    ip: str
+    bytes: int
+    packets: int
+    is_local: bool
+
+
+@dataclass(slots=True)
+class TopoEdge:
+    a: str
+    b: str
+    bytes: int
+    packets: int
+
+
+def topology(packets: list[Packet], local_ips: set[str] | None = None,
+             max_nodes: int = 20) -> tuple[list[TopoNode], list[TopoEdge]]:
+    """Baut Knoten (Top-Hosts nach Volumen) und Kanten (Verbindungen dazwischen)."""
+    local_ips = local_ips or set()
+    host_b: dict[str, list[int]] = {}        # ip -> [bytes, pkts]
+    edge_b: dict[tuple, list[int]] = {}      # (a,b) -> [bytes, pkts]
+    for p in packets:
+        if not p.src or not p.dst:
+            continue
+        for ip in (p.src, p.dst):
+            h = host_b.setdefault(ip, [0, 0])
+            h[0] += p.length
+            h[1] += 1
+        a, b = (p.src, p.dst) if p.src <= p.dst else (p.dst, p.src)
+        e = edge_b.setdefault((a, b), [0, 0])
+        e[0] += p.length
+        e[1] += 1
+    top = sorted(host_b, key=lambda ip: host_b[ip][0], reverse=True)[:max_nodes]
+    keep = set(top)
+    nodes = [TopoNode(ip, host_b[ip][0], host_b[ip][1], ip in local_ips)
+             for ip in top]
+    edges = [TopoEdge(a, b, v[0], v[1]) for (a, b), v in edge_b.items()
+             if a in keep and b in keep and a != b]
+    edges.sort(key=lambda e: e.bytes, reverse=True)
+    return nodes, edges
+
+
+# --------------------------------------------------------------------------- #
+# TCP-Stream-Trace (für Sequenz-/Durchsatz-/Window-Graphen)
+# --------------------------------------------------------------------------- #
+@dataclass(slots=True)
+class TcpSample:
+    t: float                 # Zeit relativ zum ersten Paket
+    seq: int                 # relative Sequenznummer (ab 0 je Richtung)
+    length: int              # Nutzdatenlänge
+    window: int
+    from_client: bool
+
+
+def tcp_trace(packets: list[Packet], ip_a: str, port_a, ip_b: str, port_b):
+    """Sammelt je TCP-Paket einer Verbindung (t, rel-seq, len, window, Richtung)."""
+    ea, eb = (ip_a, port_a), (ip_b, port_b)
+    sel = [p for p in packets
+           if {(p.src, p.src_port), (p.dst, p.dst_port)} == {ea, eb}
+           and p.l4 == "TCP"]
+    sel.sort(key=lambda p: (p.ts, p.number))
+    if not sel:
+        return []
+    t0 = sel[0].ts
+    client = (sel[0].src, sel[0].src_port)
+    for p in sel:
+        seg = _parse_tcp(p.raw)
+        if seg and (seg[2] & SYN) and not (seg[2] & ACK):
+            client = (p.src, p.src_port)
+            break
+    base = {}                                        # Richtung → initiale seq
+    out = []
+    for p in sel:
+        seg = _parse_tcp(p.raw)
+        if seg is None:
+            continue
+        seq, _ack, _flags, window, payload = seg
+        fc = (p.src, p.src_port) == client
+        if fc not in base:
+            base[fc] = seq
+        rel = (seq - base[fc]) & 0xFFFFFFFF
+        out.append(TcpSample(p.ts - t0, rel, len(payload), window, fc))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# RTP-Stream-Verfolgung (Verlust & Jitter je SSRC)
+# --------------------------------------------------------------------------- #
+_RTP_CLOCK = {0: 8000, 3: 8000, 4: 8000, 8: 8000, 9: 8000, 15: 8000,
+              18: 8000, 5: 8000, 6: 16000, 7: 8000, 10: 44100, 11: 44100,
+              16: 11025, 17: 22050, 25: 90000, 26: 90000, 28: 90000,
+              31: 90000, 32: 90000, 33: 90000, 34: 90000}
+
+
+@dataclass(slots=True)
+class RtpStream:
+    ssrc: int
+    src: str
+    src_port: int | None
+    dst: str
+    dst_port: int | None
+    payload_type: int
+    packets: int
+    lost: int
+    jitter_ms: float
+    duration: float
+
+    @property
+    def loss_pct(self) -> float:
+        total = self.packets + self.lost
+        return (100.0 * self.lost / total) if total else 0.0
+
+
+def rtp_streams(packets: list[Packet]) -> list[RtpStream]:
+    """Gruppiert RTP-Pakete nach SSRC und berechnet Verlust und Jitter (RFC 3550)."""
+    groups: dict[tuple, list] = {}
+    for p in packets:
+        if p.protocol != "RTP":
+            continue
+        pl = _udp_payload(p.raw)
+        if pl is None or len(pl) < 12 or (pl[0] >> 6) != 2:
+            continue
+        pt = pl[1] & 0x7F
+        seq = int.from_bytes(pl[2:4], "big")
+        rtp_ts = int.from_bytes(pl[4:8], "big")
+        ssrc = int.from_bytes(pl[8:12], "big")
+        key = (p.src, p.src_port, p.dst, p.dst_port, ssrc)
+        groups.setdefault(key, []).append((p.ts, seq, rtp_ts, pt))
+
+    out = []
+    for (src, sp, dst, dp, ssrc), items in groups.items():
+        items.sort(key=lambda x: x[0])               # nach Ankunftszeit
+        pt = items[0][3]
+        clock = _RTP_CLOCK.get(pt, 8000)
+        # Sequenznummern entrollen (16-Bit-Wrap), erwartete Anzahl bestimmen.
+        cycles = 0
+        prev_seq = None
+        ext = []
+        for _ts, seq, _rts, _pt in items:
+            if prev_seq is not None and seq < prev_seq - 30000:
+                cycles += 1
+            ext.append(seq + cycles * 65536)
+            prev_seq = seq
+        expected = max(ext) - min(ext) + 1
+        received = len(items)
+        lost = max(0, expected - received)
+        # Jitter nach RFC 3550 (in Timestamp-Einheiten → ms).
+        jitter = 0.0
+        prev_arr = prev_rts = None
+        for ts, _seq, rts, _pt in items:
+            if prev_arr is not None:
+                d = (ts - prev_arr) * clock - (rts - prev_rts)
+                jitter += (abs(d) - jitter) / 16.0
+            prev_arr, prev_rts = ts, rts
+        duration = items[-1][0] - items[0][0]
+        out.append(RtpStream(ssrc, src, sp, dst, dp, pt, received, lost,
+                             jitter / clock * 1000.0, duration))
+    out.sort(key=lambda s: s.packets, reverse=True)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Sicherheits-Heuristiken: DNS-Tunneling, Exfiltration, Erstkontakte
+# --------------------------------------------------------------------------- #
+def dns_tunneling(packets: list[Packet], min_queries: int = 20,
+                  min_avg_sub: int = 20) -> list[Finding]:
+    """Erkennt mögliches DNS-Tunneling (viele lange, eindeutige Subdomains)."""
+    agg: dict[tuple, list] = {}                   # (src, base) -> [count, sublen, subs]
+    for p in packets:
+        if p.src_port not in (53, 5353) and p.dst_port not in (53, 5353):
+            continue
+        pl = _udp_payload(p.raw)
+        if pl is None:
+            continue
+        msg = parse_dns(pl)
+        if msg is None or msg.is_response:
+            continue
+        labels = msg.qname.lower().rstrip(".").split(".")
+        if len(labels) < 3:
+            continue
+        base = ".".join(labels[-2:])
+        sub = ".".join(labels[:-2])
+        a = agg.setdefault((p.src, base), [0, 0, set()])
+        a[0] += 1
+        a[1] += len(sub)
+        a[2].add(sub)
+    out = []
+    for (src, base), (cnt, sublen, subs) in agg.items():
+        if (cnt >= min_queries and len(subs) >= min_queries * 0.6
+                and cnt and sublen / cnt >= min_avg_sub):
+            out.append(Finding(
+                SEV_WARN, "Security",
+                f"Mögliches DNS-Tunneling: {src} → {base} "
+                f"({cnt} Anfragen, {len(subs)} eindeutige Subdomains, "
+                f"Ø {sublen // cnt} Zeichen)"))
+    return out
+
+
+def exfiltration(packets: list[Packet],
+                 min_bytes: int = 10 * 1024 * 1024) -> list[Finding]:
+    """Auffällig großes ausgehendes Volumen zu einem einzelnen Host."""
+    out_by_dst: dict[str, int] = {}
+    for p in packets:
+        if p.direction == DIR_OUT and p.dst:
+            out_by_dst[p.dst] = out_by_dst.get(p.dst, 0) + p.length
+    findings = []
+    for dst, total in out_by_dst.items():
+        if total >= min_bytes:
+            mb = total / (1024 * 1024)
+            findings.append(Finding(
+                SEV_WARN, "Security",
+                f"Großes ausgehendes Volumen: {mb:.1f} MB → {dst}"))
+    return findings
+
+
+def first_contacts(packets: list[Packet]) -> list[tuple[float, str, str]]:
+    """Erstmals kontaktierte **öffentliche** Hosts (Zeit, IP, Domain), in Reihenfolge."""
+    seen: set[str] = set()
+    out = []
+    for p in packets:
+        for ip in (p.dst, p.src):
+            if ip and ip not in seen and is_public(ip):
+                seen.add(ip)
+                out.append((p.ts, ip, p.domain))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Service-Response-Time (Request↔Response-Latenz je Protokoll)
+# --------------------------------------------------------------------------- #
+@dataclass(slots=True)
+class SrtStat:
+    protocol: str
+    count: int
+    avg_ms: float
+    min_ms: float
+    max_ms: float
+
+
+def _smb2_ids(payload: bytes):
+    d = payload
+    if len(d) >= 8 and d[0] == 0x00 and d[4:8] == b"\xfeSMB":
+        d = d[4:]
+    if d[:4] == b"\xfeSMB" and len(d) >= 48:
+        flags = int.from_bytes(d[16:20], "little")
+        mid = int.from_bytes(d[24:32], "little")
+        sid = int.from_bytes(d[40:48], "little")
+        return flags, mid, sid
+    return None
+
+
+def service_response_times(packets: list[Packet]) -> list[SrtStat]:
+    """Antwortzeiten (ms) je Protokoll: DNS (txid), HTTP (Reihenfolge), SMB2 (MID)."""
+    dns_rt, http_rt, smb_rt = [], [], []
+    dns_pending: dict = {}
+    http_pending: dict = {}
+    smb_pending: dict = {}
+    for p in sorted(packets, key=lambda x: (x.ts, x.number)):
+        if p.src_port == 53 or p.dst_port == 53:
+            pl = _udp_payload(p.raw)
+            msg = parse_dns(pl) if pl else None
+            if msg:
+                key = (msg.txid, msg.qname.lower())
+                if msg.is_response:
+                    t0 = dns_pending.pop(key, None)
+                    if t0 is not None:
+                        dns_rt.append((p.ts - t0) * 1000.0)
+                else:
+                    dns_pending[key] = p.ts
+        elif p.protocol == "HTTP":
+            seg = tcp_segment(p.raw)
+            if seg:
+                first = seg[3][:64].split(b"\r\n", 1)[0]
+                _l4, a, b = _conv_key(p)
+                if first.startswith(b"HTTP/"):           # Antwort
+                    q = http_pending.get((a, b))
+                    if q:
+                        http_rt.append((p.ts - q.pop(0)) * 1000.0)
+                else:                                    # Anfrage
+                    http_pending.setdefault((a, b), []).append(p.ts)
+        elif p.protocol == "SMB2":
+            seg = tcp_segment(p.raw)
+            ids = _smb2_ids(seg[3]) if seg else None
+            if ids:
+                flags, mid, sid = ids
+                if flags & 0x1:                          # Antwort
+                    t0 = smb_pending.pop((sid, mid), None)
+                    if t0 is not None:
+                        smb_rt.append((p.ts - t0) * 1000.0)
+                else:
+                    smb_pending[(sid, mid)] = p.ts
+    out = []
+    for proto, rts in (("DNS", dns_rt), ("HTTP", http_rt), ("SMB2", smb_rt)):
+        if rts:
+            out.append(SrtStat(proto, len(rts), sum(rts) / len(rts),
+                               min(rts), max(rts)))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# TCP-Expert-Flags je Paket (Retransmission / Dup-ACK / Out-of-Order)
+# --------------------------------------------------------------------------- #
+def tcp_expert_flags(packets: list[Packet]) -> dict[int, str]:
+    """Markiert je TCP-Paket Auffälligkeiten → ``{Paketnummer: Flag-Text}``."""
+    seen: dict[tuple, set] = {}          # Richtung → {(seq,len)}
+    last_ack: dict[tuple, list] = {}     # Richtung → [ack, count]
+    high: dict[tuple, int] = {}          # Richtung → höchstes seq-Ende
+    flags: dict[int, str] = {}
+    for p in sorted(packets, key=lambda x: (x.ts, x.number)):
+        seg = _parse_tcp(p.raw)
+        if seg is None:
+            continue
+        seq, ack, fl, _win, payload = seg
+        d = (p.src, p.src_port, p.dst, p.dst_port)
+        if payload:
+            sset = seen.setdefault(d, set())
+            sig = (seq, len(payload))
+            if sig in sset:
+                flags[p.number] = (
+                    f"Retransmission – Segment Seq={seq} ({len(payload)} Bytes) "
+                    "wurde bereits gesendet (vermutlich Paketverlust)")
+            else:
+                sset.add(sig)
+                hi = high.get(d)
+                if hi is not None and seq < hi:
+                    flags[p.number] = (
+                        f"Out-of-Order – Seq={seq} liegt vor dem bereits "
+                        f"empfangenen Ende {hi} (Segment kam verspätet/vertauscht)")
+                high[d] = max(hi or 0, seq + len(payload))
+        elif fl & ACK:
+            la = last_ack.get(d)
+            if la is not None and la[0] == ack:
+                la[1] += 1
+                flags[p.number] = (
+                    f"Dup-ACK #{la[1]} – ACK={ack} wiederholt; der Empfänger "
+                    "fordert ein fehlendes Segment erneut an")
+            else:
+                last_ack[d] = [ack, 0]
+    return flags

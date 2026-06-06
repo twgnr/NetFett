@@ -6,23 +6,33 @@ Qt-Signal an das Hauptfenster zurück.
 """
 from __future__ import annotations
 
+from collections import deque
+
 from PySide6.QtCore import QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPlainTextEdit,
-    QPushButton, QScrollArea, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMessageBox,
+    QPlainTextEdit, QPushButton, QScrollArea, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from ..core.analyze import (
-    Conversation, FlowHealth, HierNode, SeqEvent, StreamResult, conversations,
-    domains, expert_info, follow_stream, io_buckets, protocol_hierarchy,
-    sequence, tcp_health,
+    Conversation, HierNode, SeqEvent, StreamResult, connection_states,
+    conversations, dns_analysis, domains, endpoints, expert_info, follow_stream,
+    io_buckets, port_stats, protocol_hierarchy, rtp_streams, sequence,
+    service_response_times, size_histogram, tcp_health,
 )
+from ..core import geoip
+from ..core.extract import http_objects
+from ..core.hpack import decode_http2_headers
 from ..core.models import Packet
+from ..core.procmap import aggregate_processes
 from ..core.resolve import NameResolver
-from .graph_widget import GraphWidget
+from ..core.tlssession import decrypt_conversation
+from .charts import BarChart, DonutChart, MultiLineChart
+from .pro_dialogs import ObjectExtractDialog, StreamGraphDialog
+from .graph_widget import GraphWidget, human
 from .theme import THEME
-from .graph_widget import human
 
 _MONO = QFont("Consolas", 9)
 _CLIENT_COLOR = "#5aa9ff"
@@ -51,11 +61,13 @@ class ConversationsDialog(QDialog):
             "A→B", "B→A", "Bytes", "Dauer", "Durchsatz"]
 
     def __init__(self, packets: list[Packet], parent=None,
-                 resolver: NameResolver | None = None) -> None:
+                 resolver: NameResolver | None = None,
+                 keylog: dict | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Verbindungen")
         self.resize(860, 540)
         self._resolver = resolver
+        self._keylog = keylog or {}
         self._packets = packets
         lay = QVBoxLayout(self)
 
@@ -108,11 +120,20 @@ class ConversationsDialog(QDialog):
         self.btn_seq.setEnabled(False)
         self.btn_seq.setToolTip("Paketfluss als Sequenzdiagramm")
         self.btn_seq.clicked.connect(self._show_sequence)
+        self.btn_graph = QPushButton("Stream-Graph…", self)
+        self.btn_graph.setEnabled(False)
+        self.btn_graph.clicked.connect(self._show_graph)
+        self.btn_objects = QPushButton("Objekte…", self)
+        self.btn_objects.setEnabled(False)
+        self.btn_objects.setToolTip("Dateien/Objekte aus HTTP (auch entschlüsselt)")
+        self.btn_objects.clicked.connect(self._show_objects)
         self.btn_resolve = QPushButton("Namen auflösen", self)
         self.btn_resolve.setToolTip("Reverse-DNS (PTR) der Endpunkt-IPs")
         self.btn_resolve.clicked.connect(self._resolve_names)
         row.addWidget(self.btn_follow)
         row.addWidget(self.btn_seq)
+        row.addWidget(self.btn_graph)
+        row.addWidget(self.btn_objects)
         row.addWidget(self.btn_filter)
         row.addWidget(self.btn_resolve)
         row.addStretch(1)
@@ -162,12 +183,42 @@ class ConversationsDialog(QDialog):
         self.btn_filter.setEnabled(conv is not None)
         self.btn_follow.setEnabled(conv is not None and conv.proto == "TCP")
         self.btn_seq.setEnabled(conv is not None)
+        self.btn_graph.setEnabled(conv is not None and conv.proto == "TCP")
+        self.btn_objects.setEnabled(conv is not None and conv.proto == "TCP")
         self._update_io_graph(conv)
 
     def _show_sequence(self) -> None:
         conv = self._selected()
         if conv is not None:
             SequenceDialog(self._packets, conv, self).exec()
+
+    def _show_graph(self) -> None:
+        conv = self._selected()
+        if conv is not None:
+            StreamGraphDialog(self._packets, conv, self).exec()
+
+    def _show_objects(self) -> None:
+        conv = self._selected()
+        if conv is None:
+            return
+        # Bei TLS und geladenen Schlüsseln zuerst entschlüsseln.
+        cb = sb = b""
+        if self._keylog:
+            dec = decrypt_conversation(self._packets, conv.a, conv.a_port,
+                                       conv.b, conv.b_port, self._keylog)
+            if dec.ok:
+                cb, sb = dec.client_text, dec.server_text
+        if not cb and not sb:
+            res = follow_stream(self._packets, conv.a, conv.a_port,
+                                conv.b, conv.b_port)
+            cb, sb = res.client_bytes, res.server_bytes
+        objs = http_objects(cb, sb)
+        if not objs:
+            QMessageBox.information(self, "Objekte",
+                                   "Keine HTTP-Objekte gefunden (evtl. "
+                                   "verschlüsselt – Schlüssel laden?).")
+            return
+        ObjectExtractDialog(objs, self).exec()
 
     def _update_io_graph(self, conv: Conversation | None) -> None:
         if conv is None:
@@ -288,11 +339,15 @@ class FollowStreamDialog(QDialog):
     """Zeigt den rekonstruierten TCP-Strom; Client/Server farblich getrennt."""
 
     def __init__(self, packets: list[Packet], conv: Conversation,
-                 parent=None) -> None:
+                 parent=None, keylog: dict | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(
             f"TCP-Stream  {_ep(conv.a, conv.a_port)} ⇄ {_ep(conv.b, conv.b_port)}")
         self.resize(820, 560)
+        self._packets = packets
+        self._conv = conv
+        self._keylog = keylog or {}
+        self._decrypted = None          # DecryptResult nach erfolgreicher Entschl.
         self._res: StreamResult = follow_stream(
             packets, conv.a, conv.a_port, conv.b, conv.b_port)
 
@@ -300,17 +355,22 @@ class FollowStreamDialog(QDialog):
         top = QHBoxLayout()
         c = self._res.client
         s = self._res.server
-        head = QLabel(
+        self.head = QLabel(
             f"<span style='color:{_CLIENT_COLOR}'>■ Client {_ep(*c)}</span>"
             f"   →   "
             f"<span style='color:{_SERVER_COLOR}'>■ Server {_ep(*s)}</span>"
             f"   ·   {human(len(self._res.client_bytes))} ↑ / "
             f"{human(len(self._res.server_bytes))} ↓")
-        top.addWidget(head)
+        top.addWidget(self.head)
         top.addStretch(1)
+        self.btn_decrypt = QPushButton("Entschlüsseln (TLS)", self)
+        self.btn_decrypt.setEnabled(bool(self._keylog))
+        self.btn_decrypt.setToolTip("TLS mit geladener SSLKEYLOGFILE entschlüsseln")
+        self.btn_decrypt.clicked.connect(self._decrypt)
+        top.addWidget(self.btn_decrypt)
         top.addWidget(QLabel("Ansicht:"))
         self.mode = QComboBox(self)
-        self.mode.addItems(["ASCII", "Hex"])
+        self.mode.addItems(["ASCII", "Hex", "HTTP/2-Header"])
         self.mode.currentTextChanged.connect(self._render)
         top.addWidget(self.mode)
         self.dir = QComboBox(self)
@@ -330,21 +390,79 @@ class FollowStreamDialog(QDialog):
         lay.addWidget(close)
         self._render()
 
+    def _decrypt(self) -> None:
+        from ..core.tlssession import decrypt_conversation
+        res = decrypt_conversation(self._packets, self._conv.a, self._conv.a_port,
+                                   self._conv.b, self._conv.b_port, self._keylog)
+        if not res.ok:
+            QMessageBox.information(self, "TLS-Entschlüsselung", res.info)
+            return
+        self._decrypted = res
+        self.head.setText(f"<span style='color:#56d364'>🔓 {res.info}</span>")
+        self.btn_decrypt.setEnabled(False)
+        self._render()
+
+    def _chunks(self):
+        if self._decrypted is not None:
+            return [(True, self._decrypted.client_text),
+                    (False, self._decrypted.server_text)]
+        return [(ch.from_client, ch.data) for ch in self._res.chunks]
+
+    def _dir_bytes(self):
+        """Rohbytes je Richtung (entschlüsselt falls vorhanden)."""
+        if self._decrypted is not None:
+            return self._decrypted.client_text, self._decrypted.server_text
+        return self._res.client_bytes, self._res.server_bytes
+
+    def _render_http2(self, which: str) -> None:
+        c_bytes, s_bytes = self._dir_bytes()
+        parts: list[str] = []
+        for from_client, data, color in (
+                (True, c_bytes, _CLIENT_COLOR), (False, s_bytes, _SERVER_COLOR)):
+            if which == "Nur Client" and not from_client:
+                continue
+            if which == "Nur Server" and from_client:
+                continue
+            try:
+                frames = decode_http2_headers(data)
+            except Exception:
+                frames = []
+            if not frames:
+                continue
+            who = "Client → Server" if from_client else "Server → Client"
+            block = [f"<b>{who}</b>"]
+            for sid, headers in frames:
+                block.append(f"  <i>Stream {sid}</i>")
+                for name, value in headers:
+                    block.append(f"    {_escape(name)}: {_escape(value)}")
+            parts.append(f"<span style='color:{color};white-space:pre'>"
+                         f"{'<br>'.join(block)}</span>")
+        self.view.clear()
+        self.view.appendHtml("<br><br>".join(parts) if parts else
+                             "<i>Keine HTTP/2-HEADERS-Frames gefunden. (Nur bei "
+                             "HTTP/2-Verkehr; TLS ggf. erst entschlüsseln.)</i>")
+        self.view.verticalScrollBar().setValue(0)
+
     def _render(self, *_a) -> None:
         which = self.dir.currentText()
-        as_hex = self.mode.currentText() == "Hex"
+        mode = self.mode.currentText()
+        if mode == "HTTP/2-Header":
+            self._render_http2(which)
+            return
+        as_hex = mode == "Hex"
         parts: list[str] = []
-        for ch in self._res.chunks:
-            if which == "Nur Client" and not ch.from_client:
+        for from_client, data in self._chunks():
+            if which == "Nur Client" and not from_client:
                 continue
-            if which == "Nur Server" and ch.from_client:
+            if which == "Nur Server" and from_client:
                 continue
-            color = _CLIENT_COLOR if ch.from_client else _SERVER_COLOR
-            body = _hexblock(ch.data) if as_hex else _ascii(ch.data)
+            if not data:
+                continue
+            color = _CLIENT_COLOR if from_client else _SERVER_COLOR
+            body = _hexblock(data) if as_hex else _ascii(data)
             parts.append(f"<span style='color:{color};white-space:pre'>"
                          f"{_escape(body)}</span>")
         self.view.clear()
-        # Farbiger Text über das zugrunde liegende Dokument als HTML einfügen.
         self.view.appendHtml("<br>".join(parts) if parts
                              else "<i>Keine Nutzdaten in dieser Richtung.</i>")
         self.view.verticalScrollBar().setValue(0)
@@ -525,6 +643,337 @@ class SequenceDialog(QDialog):
         area.setWidgetResizable(True)
         area.setWidget(_SequenceView(_ep(*client), _ep(*server), events, self))
         lay.addWidget(area, 1)
+        close = QDialogButtonBox(QDialogButtonBox.Close, self)
+        close.rejected.connect(self.reject)
+        lay.addWidget(close)
+
+
+# --------------------------------------------------------------------------- #
+class DnsAnalysisDialog(QDialog):
+    """DNS-Tiefenanalyse: je Name Anfragen/Antworten, NXDOMAIN, Ø-Zeit, IPs."""
+    filterRequested = Signal(str)
+
+    COLS = ["Name", "Typ", "Anfragen", "Antworten", "NXDOMAIN", "Ø-Zeit",
+            "Adressen"]
+
+    def __init__(self, packets: list[Packet], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("DNS-Analyse")
+        self.resize(820, 480)
+        lay = QVBoxLayout(self)
+        stats = dns_analysis(packets)
+        total_q = sum(s.queries for s in stats)
+        total_nx = sum(s.nxdomain for s in stats)
+        lay.addWidget(QLabel(f"{len(stats)} Namen · {total_q} Anfragen · "
+                             f"{total_nx} NXDOMAIN"))
+        self.tree = QTreeWidget(self)
+        self.tree.setHeaderLabels(self.COLS)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setFont(_MONO)
+        for s in stats:
+            it = QTreeWidgetItem([
+                s.name, s.qtype, str(s.queries), str(s.responses),
+                str(s.nxdomain),
+                f"{s.avg_ms:.1f} ms" if s.avg_ms is not None else "—",
+                ", ".join(s.addresses)])
+            for col in (2, 3, 4, 5):
+                it.setTextAlignment(col, int(Qt.AlignRight | Qt.AlignVCenter))
+            if s.nxdomain:
+                it.setForeground(4, QColor("#d29922"))
+            self.tree.addTopLevelItem(it)
+        for col in range(len(self.COLS)):
+            self.tree.resizeColumnToContents(col)
+        self.tree.itemDoubleClicked.connect(
+            lambda it, _c: self.filterRequested.emit(it.text(0)))
+        lay.addWidget(self.tree)
+        close = QDialogButtonBox(QDialogButtonBox.Close, self)
+        close.rejected.connect(self.reject)
+        lay.addWidget(close)
+
+
+# --------------------------------------------------------------------------- #
+class EndpointsDialog(QDialog):
+    """Endpunkt-/Port-Statistik und Paketgrößen-Verteilung."""
+    filterRequested = Signal(str)
+
+    def __init__(self, packets: list[Packet], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Endpunkte & Ports")
+        self.resize(880, 620)
+        lay = QVBoxLayout(self)
+
+        lay.addWidget(self._caption("Hosts (nach Volumen)"))
+        self.ep_tree = QTreeWidget(self)
+        geo_on = geoip.available()
+        cols = ["Host", "Pakete", "Bytes", "↑ gesendet", "↓ empfangen"]
+        if geo_on:
+            cols.append("Land / ASN")
+        self.ep_tree.setHeaderLabels(cols)
+        self.ep_tree.setRootIsDecorated(False)
+        self.ep_tree.setFont(_MONO)
+        for e in endpoints(packets):
+            row = [e.ip, str(e.packets), human(e.bytes),
+                   f"{e.tx_pkts}/{human(e.tx_bytes)}",
+                   f"{e.rx_pkts}/{human(e.rx_bytes)}"]
+            if geo_on:
+                row.append(geoip.describe(e.ip))
+            it = QTreeWidgetItem(row)
+            for col in (1, 2, 3, 4):
+                it.setTextAlignment(col, int(Qt.AlignRight | Qt.AlignVCenter))
+            self.ep_tree.addTopLevelItem(it)
+        for col in range(len(cols)):
+            self.ep_tree.resizeColumnToContents(col)
+        self.ep_tree.itemDoubleClicked.connect(
+            lambda it, _c: self.filterRequested.emit(f"host {it.text(0)}"))
+        lay.addWidget(self.ep_tree, 2)
+
+        lay.addWidget(self._caption("Dienst-Ports (nach Volumen)"))
+        self.port_tree = QTreeWidget(self)
+        self.port_tree.setHeaderLabels(["Port", "Dienst", "L4", "Pakete", "Bytes"])
+        self.port_tree.setRootIsDecorated(False)
+        self.port_tree.setFont(_MONO)
+        for p in port_stats(packets):
+            it = QTreeWidgetItem([str(p.port), p.service, p.proto,
+                                  str(p.packets), human(p.bytes)])
+            for col in (0, 3, 4):
+                it.setTextAlignment(col, int(Qt.AlignRight | Qt.AlignVCenter))
+            self.port_tree.addTopLevelItem(it)
+        for col in range(5):
+            self.port_tree.resizeColumnToContents(col)
+        self.port_tree.itemDoubleClicked.connect(
+            lambda it, _c: self.filterRequested.emit(f"port {it.text(0)}"))
+        lay.addWidget(self.port_tree, 1)
+
+        lay.addWidget(self._caption("Paketgrößen-Verteilung"))
+        self.hist = BarChart("", "Pakete", self)
+        self.hist.setMinimumHeight(140)
+        self.hist.set_data([(label, n) for label, n in size_histogram(packets)])
+        lay.addWidget(self.hist)
+
+        close = QDialogButtonBox(QDialogButtonBox.Close, self)
+        close.rejected.connect(self.reject)
+        lay.addWidget(close)
+
+    @staticmethod
+    def _caption(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet("color:#8b949e; font-weight:bold; padding:2px 0;")
+        return lbl
+
+
+# --------------------------------------------------------------------------- #
+class ConnectionStatesDialog(QDialog):
+    """TCP-Verbindungen mit Lebenszyklus-Zustand."""
+    filterRequested = Signal(str)
+
+    COLS = ["Endpunkt A", "Endpunkt B", "Zustand", "Aufbau", "Dauer", "Pakete"]
+    _COLORS = {"Zurückgesetzt (RST)": "#f85149",
+               "Fehlgeschlagen (keine Antwort)": "#f85149",
+               "Aufbau (SYN/ACK)": "#d29922", "Unvollständig": "#d29922"}
+
+    def __init__(self, packets: list[Packet], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Verbindungs-Status")
+        self.resize(820, 480)
+        lay = QVBoxLayout(self)
+        conns = connection_states(packets)
+        bad = sum(1 for c in conns if c.state in self._COLORS)
+        lay.addWidget(QLabel(f"{len(conns)} TCP-Verbindung(en), "
+                             f"{bad} auffällig"))
+        self.tree = QTreeWidget(self)
+        self.tree.setHeaderLabels(self.COLS)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setFont(_MONO)
+        for c in conns:
+            it = QTreeWidgetItem([
+                _ep(c.a, c.a_port), _ep(c.b, c.b_port), c.state,
+                f"{c.setup_ms:.1f} ms" if c.setup_ms is not None else "—",
+                f"{c.duration:.3f}s", str(c.packets)])
+            for col in (3, 4, 5):
+                it.setTextAlignment(col, int(Qt.AlignRight | Qt.AlignVCenter))
+            color = self._COLORS.get(c.state)
+            if color:
+                it.setForeground(2, QColor(color))
+            self.tree.addTopLevelItem(it)
+        for col in range(len(self.COLS)):
+            self.tree.resizeColumnToContents(col)
+        self.tree.itemDoubleClicked.connect(self._double)
+        lay.addWidget(self.tree)
+        close = QDialogButtonBox(QDialogButtonBox.Close, self)
+        close.rejected.connect(self.reject)
+        lay.addWidget(close)
+
+    def _double(self, item, _col) -> None:
+        a = item.text(0).rsplit(":", 1)[0]
+        b = item.text(1).rsplit(":", 1)[0]
+        self.filterRequested.emit(f"host {a} host {b}")
+
+
+# --------------------------------------------------------------------------- #
+class ProcessTrafficDialog(QDialog):
+    """Live-Darstellung des Verkehrs nach Programmen (Donut + Tabelle)."""
+    filterRequested = Signal(str)
+
+    COLS = ["Programm", "Pakete", "Bytes", "↑ gesendet", "↓ empfangen"]
+
+    def __init__(self, model, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Programmverkehr")
+        self.resize(720, 560)
+        self._model = model
+        lay = QVBoxLayout(self)
+
+        self.hint = QLabel("")
+        self.hint.setStyleSheet("color:#8b949e;")
+        lay.addWidget(self.hint)
+
+        self.donut = DonutChart("Verkehr nach Programm", "B", self)
+        self.donut.setMinimumHeight(170)
+        self.donut.sliceClicked.connect(self._slice)
+        lay.addWidget(self.donut)
+
+        self.timeline = MultiLineChart("Verlauf nach Programm", "B/s", self)
+        self.timeline.setMinimumHeight(120)
+        self.timeline.setMaximumHeight(150)
+        lay.addWidget(self.timeline)
+        self._hist: dict[str, deque] = {}     # Programm → Bytes/s-Historie
+        self._last: dict[str, int] | None = None
+
+        self.tree = QTreeWidget(self)
+        self.tree.setHeaderLabels(self.COLS)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setFont(_MONO)
+        self.tree.itemDoubleClicked.connect(
+            lambda it, _c: self._slice(it.text(0)))
+        lay.addWidget(self.tree, 1)
+
+        close = QDialogButtonBox(QDialogButtonBox.Close, self)
+        close.rejected.connect(self.reject)
+        lay.addWidget(close)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._refresh)
+        self._timer.start()
+        self._refresh()
+
+    def _slice(self, name: str) -> None:
+        if name and name != "unbekannt":
+            self.filterRequested.emit(name)
+
+    _WIN = 60
+
+    def _refresh(self) -> None:
+        stats = aggregate_processes(self._model.all_packets)
+        self.donut.set_data([(s.name, s.bytes) for s in stats])
+        self._update_timeline(stats)
+        self.tree.clear()
+        for s in stats:
+            it = QTreeWidgetItem([
+                s.name, str(s.packets), human(s.bytes),
+                human(s.tx_bytes), human(s.rx_bytes)])
+            for col in (1, 2, 3, 4):
+                it.setTextAlignment(col, int(Qt.AlignRight | Qt.AlignVCenter))
+            self.tree.addTopLevelItem(it)
+        for col in range(len(self.COLS)):
+            self.tree.resizeColumnToContents(col)
+        total = sum(s.bytes for s in stats) or 1
+        unknown = next((s.bytes for s in stats if s.name == "unbekannt"), 0)
+        if unknown / total > 0.5:
+            self.hint.setText(
+                "Viel Verkehr ohne Programmzuordnung – Prozesszuordnung gibt es "
+                "nur bei Live-Erfassung und am besten als Administrator.")
+        else:
+            self.hint.setText("")
+
+    def _update_timeline(self, stats) -> None:
+        """Bildet aus den kumulativen Summen den Durchsatz (Bytes/s) je Programm."""
+        cur = {s.name: s.bytes for s in stats}
+        if self._last is None:
+            self._last = cur                 # Basiswert, kein Anfangs-Ausschlag
+            return
+        for name in set(self._hist) | set(cur):
+            delta = max(0, cur.get(name, 0) - self._last.get(name, 0))
+            dq = self._hist.get(name)
+            if dq is None:
+                dq = deque([0] * self._WIN, maxlen=self._WIN)
+                self._hist[name] = dq
+            dq.append(delta)
+        self._last = cur
+        top = [s.name for s in stats[:6]]
+        self.timeline.set_series({n: list(self._hist[n])
+                                  for n in top if n in self._hist})
+
+    def closeEvent(self, event) -> None:
+        self._timer.stop()
+        super().closeEvent(event)
+
+
+# --------------------------------------------------------------------------- #
+class SrtDialog(QDialog):
+    """Service-Response-Time je Protokoll (Anzahl, Ø/Min/Max in ms)."""
+
+    def __init__(self, packets: list[Packet], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Service-Response-Time")
+        self.resize(520, 320)
+        lay = QVBoxLayout(self)
+        rows = service_response_times(packets)
+        lay.addWidget(QLabel(f"{len(rows)} Protokoll(e) mit Antwortzeiten"))
+        tree = QTreeWidget(self)
+        tree.setHeaderLabels(["Protokoll", "Anfragen", "Ø", "Min", "Max"])
+        tree.setRootIsDecorated(False)
+        tree.setFont(_MONO)
+        for s in rows:
+            it = QTreeWidgetItem([s.protocol, str(s.count), f"{s.avg_ms:.1f} ms",
+                                  f"{s.min_ms:.1f} ms", f"{s.max_ms:.1f} ms"])
+            for col in (1, 2, 3, 4):
+                it.setTextAlignment(col, int(Qt.AlignRight | Qt.AlignVCenter))
+            tree.addTopLevelItem(it)
+        for col in range(5):
+            tree.resizeColumnToContents(col)
+        lay.addWidget(tree)
+        close = QDialogButtonBox(QDialogButtonBox.Close, self)
+        close.rejected.connect(self.reject)
+        lay.addWidget(close)
+
+
+# --------------------------------------------------------------------------- #
+class RtpStreamsDialog(QDialog):
+    """RTP-Streams je SSRC mit Paketzahl, Verlust und Jitter."""
+    filterRequested = Signal(str)
+
+    COLS = ["SSRC", "Quelle", "Ziel", "PT", "Pakete", "Verlust", "Jitter",
+            "Dauer"]
+
+    def __init__(self, packets: list[Packet], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("RTP-Streams")
+        self.resize(820, 440)
+        lay = QVBoxLayout(self)
+        streams = rtp_streams(packets)
+        lay.addWidget(QLabel(f"{len(streams)} RTP-Stream(s)"))
+        self.tree = QTreeWidget(self)
+        self.tree.setHeaderLabels(self.COLS)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setFont(_MONO)
+        for s in streams:
+            it = QTreeWidgetItem([
+                f"0x{s.ssrc:08x}", _ep(s.src, s.src_port),
+                _ep(s.dst, s.dst_port), str(s.payload_type), str(s.packets),
+                f"{s.lost} ({s.loss_pct:.1f}%)", f"{s.jitter_ms:.1f} ms",
+                f"{s.duration:.2f}s"])
+            for col in (3, 4, 5, 6, 7):
+                it.setTextAlignment(col, int(Qt.AlignRight | Qt.AlignVCenter))
+            if s.lost:
+                it.setForeground(5, QColor("#d29922"))
+            it.setData(0, Qt.UserRole, s.src)
+            self.tree.addTopLevelItem(it)
+        for col in range(len(self.COLS)):
+            self.tree.resizeColumnToContents(col)
+        self.tree.itemDoubleClicked.connect(
+            lambda it, _c: self.filterRequested.emit(f"host {it.data(0, Qt.UserRole)}"))
+        lay.addWidget(self.tree)
         close = QDialogButtonBox(QDialogButtonBox.Close, self)
         close.rejected.connect(self.reject)
         lay.addWidget(close)

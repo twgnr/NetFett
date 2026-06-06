@@ -11,8 +11,9 @@ from ..core.models import DIR_IN, DIR_OUT, Packet
 from .theme import THEME
 
 COLUMNS = ["Nr.", "Zeit", "Quelle", "Ziel", "Protokoll", "Länge", "Ri.",
-           "Info", "Name"]
+           "Info", "Name", "Programm"]
 NAME_COL = COLUMNS.index("Name")
+PROC_COL = COLUMNS.index("Programm")
 
 # Hintergrundfarbe je Protokoll (Wireshark-ähnliche, dezente Tönung).
 _PROTO_BG = {
@@ -22,6 +23,7 @@ _PROTO_BG = {
 _DIR_FG = {DIR_OUT: "#ffb454", DIR_IN: "#5aa9ff"}
 _DIR_GLYPH = {DIR_OUT: "▲", DIR_IN: "▼"}
 _MARK_BG = "#3a2f0a"          # Hintergrund markierter Zeilen (amber)
+_NO_MATCH = object()          # Sentinel: „Regeln geprüft, kein Treffer"
 
 # Zeitdarstellung: relativ zum ersten Paket, Tageszeit, oder absolut (Epoch).
 TIME_REL, TIME_OFDAY, TIME_ABS = "rel", "tod", "abs"
@@ -38,6 +40,10 @@ class PacketModel(QAbstractTableModel):
         self._time_mode: str = TIME_REL
         self._max: int = 0                   # Ringpuffer-Grenze (0 = unbegrenzt)
         self._name_provider = None           # Callable[str, str|None] für Reverse-DNS
+        self._rules = None                   # RuleSet für Einfärbe-Regeln
+        self._rule_cache: dict[int, object] = {}
+        self._expert: dict[int, str] = {}    # Paketnummer → TCP-Expert-Flag
+        self._comments: dict[int, str] = {}  # Paketnummer → Kommentar
 
     # --- Qt-Schnittstelle --------------------------------------------------
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -58,11 +64,20 @@ class PacketModel(QAbstractTableModel):
         col = index.column()
         if role == Qt.DisplayRole:
             return self._cell(pkt, col)
-        if role == Qt.ForegroundRole and col == 6:
-            return QBrush(QColor(_DIR_FG.get(pkt.direction, "#9aa4b2")))
+        if role == Qt.ForegroundRole:
+            rc = self._rule_colors(pkt)
+            if rc and rc[0]:
+                return QBrush(QColor(rc[0]))
+            if col == 6:
+                return QBrush(QColor(_DIR_FG.get(pkt.direction, "#9aa4b2")))
         if role == Qt.BackgroundRole:
             if pkt.number in self._marked:          # Markierung hat Vorrang
                 return QBrush(QColor(_MARK_BG if THEME.dark else "#fff8c5"))
+            rc = self._rule_colors(pkt)
+            if rc and rc[1]:
+                return QBrush(QColor(rc[1]))
+            if pkt.number in self._expert:          # TCP-Auffälligkeit
+                return QBrush(QColor("#3a2a10" if THEME.dark else "#fff1c2"))
             if THEME.dark:                          # dezente Tönung nur im Dunkeln
                 bg = _PROTO_BG.get(pkt.protocol)
                 if bg:
@@ -71,6 +86,13 @@ class PacketModel(QAbstractTableModel):
             f = QFont()
             f.setBold(True)
             return f
+        if role == Qt.ToolTipRole:
+            tips = []
+            if pkt.number in self._expert:
+                tips.append(f"TCP: {self._expert[pkt.number]}")
+            if pkt.number in self._comments:
+                tips.append(f"💬 {self._comments[pkt.number]}")
+            return "\n".join(tips) or None
         if role == Qt.TextAlignmentRole and col in (0, 5):
             return int(Qt.AlignRight | Qt.AlignVCenter)
         return None
@@ -96,6 +118,8 @@ class PacketModel(QAbstractTableModel):
             if self._name_provider is None:
                 return ""
             return self._name_provider(self._remote_ip(pkt)) or ""
+        if col == PROC_COL:
+            return pkt.process
         return ""
 
     @staticmethod
@@ -137,6 +161,42 @@ class PacketModel(QAbstractTableModel):
         self._marked.discard(num) if num in self._marked else self._marked.add(num)
         self.dataChanged.emit(self.index(row, 0),
                               self.index(row, self.columnCount() - 1))
+
+    def set_expert_flags(self, flags: dict) -> None:
+        self._expert = dict(flags)
+        self._repaint_all()
+
+    @property
+    def expert_count(self) -> int:
+        return len(self._expert)
+
+    def set_comment(self, number: int, text: str) -> None:
+        if text:
+            self._comments[number] = text
+        else:
+            self._comments.pop(number, None)
+        self._repaint_all()
+
+    def comment(self, number: int) -> str:
+        return self._comments.get(number, "")
+
+    @property
+    def comments(self) -> dict:
+        return dict(self._comments)
+
+    def _repaint_all(self) -> None:
+        if self._view:
+            self.dataChanged.emit(self.index(0, 0),
+                                  self.index(len(self._view) - 1,
+                                             self.columnCount() - 1))
+
+    def add_marks(self, numbers) -> None:
+        """Markiert die angegebenen Paketnummern (z. B. IOC-Treffer)."""
+        self._marked.update(numbers)
+        if self._view:
+            self.dataChanged.emit(self.index(0, 0),
+                                  self.index(len(self._view) - 1,
+                                             self.columnCount() - 1))
 
     def clear_marks(self) -> None:
         if not self._marked:
@@ -185,6 +245,25 @@ class PacketModel(QAbstractTableModel):
     @property
     def max_packets(self) -> int:
         return self._max
+
+    # --- Einfärbe-Regeln ---------------------------------------------------
+    def set_color_rules(self, ruleset) -> None:
+        self._rules = ruleset
+        self._rule_cache.clear()
+        if self._view:
+            self.dataChanged.emit(self.index(0, 0),
+                                  self.index(len(self._view) - 1,
+                                             self.columnCount() - 1))
+
+    def _rule_colors(self, pkt: Packet):
+        if self._rules is None:
+            return None
+        cached = self._rule_cache.get(pkt.number)
+        if cached is not None:
+            return None if cached is _NO_MATCH else cached
+        res = self._rules.match(pkt)
+        self._rule_cache[pkt.number] = res if res is not None else _NO_MATCH
+        return res
 
     # --- Reverse-DNS-Spalte ------------------------------------------------
     def set_name_provider(self, provider) -> None:
@@ -246,6 +325,8 @@ class PacketModel(QAbstractTableModel):
             prov = self._name_provider
             return (lambda p: (prov(self._remote_ip(p)) or "")) if prov \
                 else (lambda p: "")
+        if col == PROC_COL:
+            return lambda p: p.process
         return keys.get(col)
 
     def set_filter(self, func: Callable[[Packet], bool] | None) -> None:
@@ -259,6 +340,9 @@ class PacketModel(QAbstractTableModel):
         self._all.clear()
         self._view.clear()
         self._marked.clear()
+        self._rule_cache.clear()
+        self._expert.clear()
+        self._comments.clear()
         self._t0 = None
         self.endResetModel()
 
@@ -273,8 +357,8 @@ class PacketModel(QAbstractTableModel):
 
     @property
     def view_packets(self) -> list[Packet]:
-        """Aktuell angezeigte (gefilterte) Pakete."""
-        return self._view
+        """Aktuell sichtbare (gefilterte) Pakete (Kopie)."""
+        return list(self._view)
 
     @property
     def shown(self) -> int:

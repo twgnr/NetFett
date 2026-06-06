@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "NetFett – Wireshark-ähnlicher Netzwerk-Monitor (PySide6, reines Python)"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["PySide6>=6.6"]
+dependencies = ["PySide6>=6.6", "cryptography>=42"]
+
+[project.optional-dependencies]
+geoip = ["maxminddb>=2.0"]      # optional: GeoLite2-Land/Stadt/ASN-Auflösung
 
 [project.scripts]
 netfett = "netfett.__main__:main"

@@ -202,4 +202,5 @@ def test_expert_info_quiet_for_normal_traffic():
         _pkt(2, "1.1.1.1", "192.168.0.10", 443, 50000, 0, 0x12),
         _pkt(3, "192.168.0.10", "1.1.1.1", 50000, 443, 1, 0x18, b"data"),
     ]
-    assert expert_info(pkts) == []
+    # Keine echten Probleme (Warn/Fehler); informative Erstkontakte sind erlaubt.
+    assert not any(f.severity in ("warn", "error") for f in expert_info(pkts))

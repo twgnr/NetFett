@@ -22,7 +22,7 @@ from __future__ import annotations
 from .models import DIR_IN, DIR_OUT, Packet
 
 _PROTO_WORDS = {"tcp", "udp", "icmp", "dns", "mdns", "tls", "http", "https",
-                "arp", "igmp"}
+                "arp", "igmp", "smtp", "imap", "pop3", "ftp", "ssh", "mail"}
 
 
 class FilterError(ValueError):
@@ -119,6 +119,8 @@ def _make_proto(word: str):
         l4 = (pkt.l4 or "").lower()
         if word == "https":
             return p == "tls" or pkt.src_port == 443 or pkt.dst_port == 443
+        if word == "mail":
+            return p in ("smtp", "imap", "pop3")
         return word == p or word == l4
     return term
 
@@ -163,5 +165,6 @@ def _make_text(value: str):
         return (needle in pkt.src.lower() or needle in pkt.dst.lower()
                 or needle in (pkt.info or "").lower()
                 or needle in (pkt.protocol or "").lower()
-                or needle in (pkt.domain or "").lower())
+                or needle in (pkt.domain or "").lower()
+                or needle in (pkt.process or "").lower())
     return term

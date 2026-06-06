@@ -78,10 +78,12 @@ def _ng_block(block_type: int, body: bytes) -> bytes:
             + struct.pack("<I", total))
 
 
-def write_pcapng(path: str, packets, linktype: int = LINKTYPE_RAW) -> int:
+def write_pcapng(path: str, packets, linktype: int = LINKTYPE_RAW,
+                 comments: dict | None = None) -> int:
     """Schreibt Pakete als ``.pcapng`` (Section Header + Interface + Pakete).
 
-    Zeitstempel in Mikrosekunden (pcapng-Standardauflösung). Gibt Anzahl zurück."""
+    Zeitstempel in Mikrosekunden. ``comments`` (Paketnummer → Text) werden als
+    pcapng-``opt_comment`` je Paket geschrieben. Gibt die Anzahl zurück."""
     n = 0
     with open(path, "wb") as f:
         # Section Header Block: Byte-Order-Magic, Version 1.0, Section-Länge -1.
@@ -95,6 +97,11 @@ def write_pcapng(path: str, packets, linktype: int = LINKTYPE_RAW) -> int:
             body = struct.pack("<IIIII", 0, ts_us >> 32, ts_us & 0xFFFFFFFF,
                                len(raw), len(raw))
             body += raw + b"\x00" * (-len(raw) % 4)      # auf 4 Byte auffüllen
+            comment = comments.get(getattr(pkt, "number", 0)) if comments else None
+            if comment:
+                cb = comment.encode("utf-8")
+                body += struct.pack("<HH", 1, len(cb)) + cb + b"\x00" * (-len(cb) % 4)
+                body += struct.pack("<HH", 0, 0)         # opt_endofopt
             f.write(_ng_block(_PCAPNG_EPB, body))
             n += 1
     return n
@@ -132,3 +139,121 @@ def read_pcap(path: str):
             raw = raw[strip:]
         out.append((sec + usec / 1_000_000, raw))
     return out
+
+
+def read_pcapng(path: str):
+    """Liest eine ``.pcapng``-Datei. Liefert Liste von (ts, raw)-Tupeln."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if len(data) < 12 or struct.unpack("<I", data[:4])[0] != _PCAPNG_SHB:
+        raise ValueError("Keine gültige pcapng-Datei.")
+    endian = "<" if data[8:12] == struct.pack("<I", _PCAPNG_BOM) else ">"
+    interfaces: list[tuple[int, int]] = []     # (linktype, tsresol-Teiler)
+    out = []
+    pos = 0
+    while pos + 12 <= len(data):
+        btype = struct.unpack(endian + "I", data[pos:pos + 4])[0] \
+            if pos else _PCAPNG_SHB
+        total = struct.unpack(endian + "I", data[pos + 4:pos + 8])[0]
+        if total < 12 or pos + total > len(data):
+            break
+        body = data[pos + 8:pos + total - 4]
+        if btype == _PCAPNG_IDB:
+            linktype = struct.unpack(endian + "H", body[0:2])[0]
+            interfaces.append((linktype, 1_000_000))     # Default: µs
+        elif btype == _PCAPNG_EPB:
+            ifid, tsh, tsl, caplen = struct.unpack(endian + "IIII", body[0:16])
+            raw = body[20:20 + caplen]
+            _lt, divisor = interfaces[ifid] if ifid < len(interfaces) \
+                else (LINKTYPE_RAW, 1_000_000)
+            ts = ((tsh << 32) | tsl) / divisor
+            if _lt == 1 and len(raw) > 14:                 # Ethernet abschneiden
+                raw = raw[14:]
+            out.append((ts, raw))
+        pos += total
+    return out
+
+
+def read_capture(path: str):
+    """Liest pcap **oder** pcapng (automatische Erkennung)."""
+    with open(path, "rb") as f:
+        magic = f.read(4)
+    if magic == struct.pack("<I", _PCAPNG_SHB):
+        return read_pcapng(path)
+    return read_pcap(path)
+
+
+def merge_captures(paths) -> list:
+    """Liest mehrere Capture-Dateien und führt sie zeitlich sortiert zusammen."""
+    records = []
+    for p in paths:
+        records.extend(read_capture(p))
+    records.sort(key=lambda r: r[0])
+    return records
+
+
+class RotatingPcapWriter:
+    """Schreibt fortlaufend PCAP und rotiert bei Überschreiten einer Größe.
+
+    Hält höchstens ``keep`` Dateien (``base-001.pcap``, ``base-002.pcap`` …);
+    ältere werden gelöscht. Schnittstelle wie :class:`PcapWriter`."""
+
+    def __init__(self, base_path: str, max_bytes: int = 50 * 1024 * 1024,
+                 keep: int = 5) -> None:
+        import os
+        self._dir = os.path.dirname(base_path) or "."
+        stem = os.path.basename(base_path)
+        self._stem = stem[:-5] if stem.endswith(".pcap") else stem
+        self._max_bytes = max(64 * 1024, max_bytes)
+        self._keep = max(1, keep)
+        self._index = 0
+        self._count = 0
+        self._files: list[str] = []
+        self._writer: PcapWriter | None = None
+        self._open_next()
+
+    def _open_next(self) -> None:
+        import os
+        if self._writer is not None:
+            self._writer.close()
+        self._index += 1
+        path = os.path.join(self._dir, f"{self._stem}-{self._index:03d}.pcap")
+        self._writer = PcapWriter(path)
+        self._cur_path = path
+        self._cur_bytes = 24
+        self._files.append(path)
+        while len(self._files) > self._keep:                # älteste entfernen
+            old = self._files.pop(0)
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+
+    def write_packet(self, pkt) -> None:
+        rec = 16 + len(pkt.raw)
+        if self._cur_bytes + rec > self._max_bytes:
+            self._open_next()
+        self._writer.write_packet(pkt)
+        self._cur_bytes += rec
+        self._count += 1
+
+    def write(self, ts: float, raw: bytes) -> None:
+        rec = 16 + len(raw)
+        if self._cur_bytes + rec > self._max_bytes:
+            self._open_next()
+        self._writer.write(ts, raw)
+        self._cur_bytes += rec
+        self._count += 1
+
+    def flush(self) -> None:
+        if self._writer is not None:
+            self._writer.flush()
+
+    def close(self) -> None:
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+
+    @property
+    def count(self) -> int:
+        return self._count

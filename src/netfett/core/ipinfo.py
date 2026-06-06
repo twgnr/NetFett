@@ -66,4 +66,10 @@ def classify(ip: str) -> str:
 
 
 def is_public(ip: str) -> bool:
-    return classify(ip) == "Öffentlich (Internet)"
+    """True für routbare Internet-Adressen (auch bekannte Dienste wie 1.1.1.1)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return not (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_multicast or addr.is_reserved or addr.is_unspecified)

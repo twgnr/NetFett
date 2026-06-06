@@ -38,6 +38,7 @@ class Packet:
     length: int = 0           # Gesamtlänge des Pakets in Bytes
     info: str = ""            # Kurzbeschreibung (Wireshark-ähnlich)
     domain: str = ""          # kontaktierte Domain: DNS-Query / TLS-SNI / HTTP-Host
+    process: str = ""         # zugeordnetes Programm (nur Live-Erfassung, Windows)
 
     @property
     def ports(self) -> tuple[int | None, int | None]:

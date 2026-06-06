@@ -147,6 +147,19 @@ class DnsLookupDialog(_ToolDialog):
         self.done.emit(f"\n{len(res.addresses)} Adresse(n).")
 
 
+class WhoisDialog(_ToolDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__("WHOIS", default_host="example.com", parent=parent)
+
+    def _run(self, host: str) -> None:
+        from ..core import whois
+        self.line.emit(f"WHOIS {host} …\n")
+        try:
+            self.done.emit(whois.whois(host))
+        except OSError as exc:
+            self.done.emit(f"Fehler: {exc}")
+
+
 def _rtt_stats(rtts) -> str:
     vals = [r for r in rtts if r is not None]
     if not vals:

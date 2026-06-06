@@ -10,6 +10,17 @@ import sys
 
 
 def main() -> int:
+    # Headless-Modus (CLI) ohne GUI, wenn „--read" angegeben ist.
+    from .cli import is_headless, run_cli
+    if is_headless(sys.argv):
+        return run_cli(sys.argv[1:])
+
+    # Mit „--admin": vor dem Start der Qt-App per UAC hochstufen.
+    if "--admin" in sys.argv:
+        from .elevate import is_admin, relaunch_as_admin
+        if not is_admin() and relaunch_as_admin():
+            return 0                     # elevierte Instanz übernimmt
+
     from PySide6.QtWidgets import QApplication
 
     from .gui import theme
