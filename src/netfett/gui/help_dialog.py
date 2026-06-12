@@ -208,7 +208,21 @@ sehr kurze Dauer mit wenigen Paketen = abgebrochene/abgelehnte Verbindung.</p>
 Paket</i>. Schweregrade: <b>info</b> (z. B. Erstkontakt zu neuem Host) ·
 <b>note</b> (z. B. TCP-Reset) · <b>warn</b> (z. B. Scan, ICMP-Fehler,
 DNS-Tunneling) · <b>error</b> (z. B. Klartext-Passwörter, Exfiltration).
-Kategorien u. a. TCP, ICMP, Security, Erstkontakt. Doppelklick springt zum Paket.</p>
+Kategorien u. a. TCP, ICMP, Security, TLS, DNS, Erstkontakt. Doppelklick springt
+zum Paket. Erkannt werden u. a.:</p>
+<ul>
+<li><b>TLS-Hygiene:</b> veraltete TLS-Version (SSLv3/1.0/1.1), schwache
+Cipher-Suiten, selbst-signierte/abgelaufene Zertifikate, SNI↔Zertifikats-Mismatch.</li>
+<li><b>DNS:</b> DGA-Verdacht (zufällig wirkende Domains), hohe NXDOMAIN-Rate je
+Host (Schadsoftware probiert viele Namen), DNS-Amplification (Antwort ≫ Anfrage).</li>
+<li><b>Scan/Verbindung:</b> SYN-Flood/Half-Open, hohe Verbindungs-Fehlerrate
+(viele RST), Verbindungen zu riskanten Ports (Telnet/RDP/VNC/Datenbanken/bekannte
+Malware-Ports), Telnet-Klartext-Login.</li>
+<li><b>Volumen/DoS:</b> Traffic-Spitzen/Floods je Host, mögliches ICMP-Tunneling
+(große/regelmäßige Echo-Nutzlast), NTP-„monlist" (Amplification-Risiko).</li>
+<li><b>Klassisch:</b> Port-/Host-Scan, Beaconing (C2-Verdacht),
+Klartext-Passwörter, DNS-Tunneling, Exfiltration, Erstkontakte.</li>
+</ul>
 
 <h3>TCP-Gesundheit</h3>
 <p>Je Verbindung: <i>Endpunkt A/B, Pakete, RTT, Retrans., Dup-ACK, Zero-Win</i>.

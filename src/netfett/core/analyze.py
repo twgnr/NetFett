@@ -15,10 +15,13 @@ die Rohbytes ab IPv4-Kopf; das Paketmodell bleibt unverändert.
 from __future__ import annotations
 
 import base64
+import math
 import socket
 import struct
 from dataclasses import dataclass, field
 
+from . import certinfo
+from .dissect import _tls_first_cert, tls_info
 from .ipinfo import is_public
 from .models import DIR_OUT, Packet
 
@@ -441,6 +444,10 @@ def expert_info(packets: list[Packet], scan_port_threshold: int = 15,
     findings.extend(credentials(packets))
     findings.extend(dns_tunneling(packets))
     findings.extend(exfiltration(packets))
+    findings.extend(tls_hygiene(packets))
+    findings.extend(dns_anomalies(packets))
+    findings.extend(connection_anomalies(packets))
+    findings.extend(traffic_anomalies(packets))
     for ts, ip, domain in first_contacts(packets)[:15]:
         label = f"{ip} ({domain})" if domain else ip
         findings.append(Finding(SEV_INFO, "Erstkontakt",
@@ -1174,6 +1181,297 @@ def first_contacts(packets: list[Packet]) -> list[tuple[float, str, str]]:
             if ip and ip not in seen and is_public(ip):
                 seen.add(ip)
                 out.append((p.ts, ip, p.domain))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# A — TLS-/Zertifikats-Hygiene
+# --------------------------------------------------------------------------- #
+_WEAK_TLS_VERSIONS = {"SSL 3.0", "TLS 1.0", "TLS 1.1"}
+# Tokens, die auf schwache/veraltete Cipher-Suites hindeuten (falls Name bekannt).
+_WEAK_CIPHER_TOKENS = ("RC4", "NULL", "EXPORT", "DES", "MD5", "ANON", "_40_")
+# Kuratierte, bekannt schwache Cipher-Suite-IDs (RC4/NULL/EXPORT/DES/anon).
+# Bewusst unterhalb der starken Suiten (AES-GCM ab 0x009C, ECDHE-AES ab 0xC013).
+_WEAK_CIPHER_IDS = {
+    0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0008, 0x0009,
+    0x000B, 0x000C, 0x000E, 0x000F, 0x0011, 0x0012, 0x0014, 0x0015, 0x0017,
+    0x0018, 0x0019, 0x001A, 0x001B, 0x003B,
+    0xC001, 0xC002, 0xC006, 0xC007, 0xC00B, 0xC00C, 0xC010, 0xC011,
+}
+_VOWELS = set("aeiou")
+
+
+def _host_matches_cert(host: str, names: list[str]) -> bool:
+    host = host.lower().rstrip(".")
+    for raw in names:
+        n = (raw or "").lower().rstrip(".")
+        if not n:
+            continue
+        if n == host:
+            return True
+        if n.startswith("*.") and host.endswith(n[1:]) and \
+                host.count(".") >= n.count("."):
+            return True
+    return False
+
+
+def tls_hygiene(packets: list[Packet]) -> list[Finding]:
+    """Erkennt veraltete TLS-Versionen, schwache Cipher und Zertifikatsprobleme."""
+    out: list[Finding] = []
+    sni_by_conn: dict[frozenset, str] = {}
+    weak_seen: set = set()
+    cipher_seen: set = set()
+    for p in packets:
+        seg = tcp_segment(p.raw)
+        if seg is None:
+            continue
+        _seq, _ack, _flags, payload = seg
+        if len(payload) < 6 or payload[0] != 0x16:        # nur Handshake-Records
+            continue
+        conn = frozenset({(p.src, p.src_port), (p.dst, p.dst_port)})
+        info = tls_info(payload)
+        htype = info["type"]
+        if htype == "Client Hello" and info["sni"]:
+            sni_by_conn[conn] = info["sni"]
+        if htype in ("Client Hello", "Server Hello") and \
+                info["version"] in _WEAK_TLS_VERSIONS:
+            key = (p.src, p.dst, info["version"])
+            if key not in weak_seen:
+                weak_seen.add(key)
+                out.append(Finding(
+                    SEV_WARN, "TLS",
+                    f"Veraltete TLS-Version {info['version']}: {p.src} ⇄ {p.dst}",
+                    p.number))
+        if htype == "Server Hello" and info["cipher"]:
+            cid = info.get("cipher_id")
+            weak = (cid in _WEAK_CIPHER_IDS) or any(
+                tok in info["cipher"].upper() for tok in _WEAK_CIPHER_TOKENS)
+            if weak:
+                key = (p.src, p.dst, info["cipher"])
+                if key not in cipher_seen:
+                    cipher_seen.add(key)
+                    out.append(Finding(
+                        SEV_WARN, "TLS",
+                        f"Schwache Cipher-Suite {info['cipher']}: "
+                        f"{p.src} → {p.dst}", p.number))
+        if len(payload) > 5 and payload[5] == 11:          # Certificate
+            der = _tls_first_cert(payload)
+            d = certinfo.details(der) if der else None
+            if not d:
+                continue
+            subj = d["subject"] or "?"
+            if d["self_signed"]:
+                out.append(Finding(
+                    SEV_NOTE, "TLS",
+                    f"Selbst-signiertes Zertifikat: {subj} ({p.src})", p.number))
+            if d["not_after_ts"] < p.ts:
+                out.append(Finding(
+                    SEV_WARN, "TLS",
+                    f"Abgelaufenes Zertifikat: {subj} (gültig bis "
+                    f"{d['not_after']})", p.number))
+            elif d["not_before_ts"] > p.ts:
+                out.append(Finding(
+                    SEV_NOTE, "TLS",
+                    f"Zertifikat noch nicht gültig: {subj} (ab "
+                    f"{d['not_before']})", p.number))
+            sni = sni_by_conn.get(conn)
+            if sni and d["names"] and not _host_matches_cert(sni, d["names"]):
+                out.append(Finding(
+                    SEV_NOTE, "TLS",
+                    f"SNI ≠ Zertifikat: angefragt {sni}, Zertifikat {subj}",
+                    p.number))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# B — DNS-Auffälligkeiten (DGA, NXDOMAIN-Rate, Amplification)
+# --------------------------------------------------------------------------- #
+def _shannon_entropy(text: str) -> float:
+    if not text:
+        return 0.0
+    counts: dict[str, int] = {}
+    for ch in text:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(text)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def _looks_dga(label: str, min_len: int, min_entropy: float) -> bool:
+    """Zufällig wirkende Domain: hohe Entropie UND wenig Vokale bzw. viele Ziffern.
+
+    Die Zusatzbedingung verhindert Falschmeldungen bei echten Wörtern (die
+    naturgemäß Vokale enthalten, z. B. „stackoverflow")."""
+    if len(label) < min_len or _shannon_entropy(label) < min_entropy:
+        return False
+    letters = [c for c in label if c.isalpha()]
+    vowel_ratio = (sum(c in _VOWELS for c in letters) / len(letters)
+                   if letters else 0.0)
+    digit_ratio = sum(c.isdigit() for c in label) / len(label)
+    return vowel_ratio < 0.26 or digit_ratio > 0.25
+
+
+def dns_anomalies(packets: list[Packet], nx_min: int = 15,
+                  dga_min_len: int = 12, dga_entropy: float = 3.4,
+                  amp_factor: int = 5) -> list[Finding]:
+    """DGA-Verdacht (Hoch-Entropie-Domains), hohe NXDOMAIN-Rate, Amplification."""
+    out: list[Finding] = []
+    nx_by_host: dict[str, list[int]] = {}     # querier -> [nxdomain, antworten]
+    pending_len: dict[tuple, int] = {}        # (txid, name) -> Anfragegröße
+    dga_seen: set[str] = set()
+    for p in packets:
+        if p.src_port not in (53, 5353) and p.dst_port not in (53, 5353):
+            continue
+        pl = _udp_payload(p.raw)
+        if pl is None:
+            continue
+        msg = parse_dns(pl)
+        if msg is None:
+            continue
+        if not msg.is_response:
+            labels = msg.qname.lower().rstrip(".").split(".")
+            sld = labels[-2] if len(labels) >= 2 else (labels[0] if labels else "")
+            if (sld and sld not in dga_seen
+                    and _looks_dga(sld, dga_min_len, dga_entropy)):
+                dga_seen.add(sld)
+                out.append(Finding(
+                    SEV_NOTE, "DNS",
+                    f"DGA-Verdacht (zufällig wirkende Domain): {msg.qname}"))
+            pending_len[(msg.txid, msg.qname.lower())] = len(pl)
+        else:
+            acc = nx_by_host.setdefault(p.dst, [0, 0])
+            acc[1] += 1
+            if msg.rcode == 3:
+                acc[0] += 1
+            qlen = pending_len.pop((msg.txid, msg.qname.lower()), None)
+            if qlen and len(pl) >= max(512, qlen * amp_factor):
+                out.append(Finding(
+                    SEV_NOTE, "DNS",
+                    f"DNS-Amplification: Antwort {len(pl)} B ≫ Anfrage {qlen} B "
+                    f"({msg.qname})", p.number))
+    for host, (nx, total) in nx_by_host.items():
+        if total >= 20 and nx >= nx_min and nx / total >= 0.5:
+            out.append(Finding(
+                SEV_WARN, "DNS",
+                f"Hohe NXDOMAIN-Rate: {host} erhielt {nx}/{total} NXDOMAIN "
+                "(nicht gefunden) – DGA-/Schadsoftware-Verdacht"))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# C — Scan- & Verbindungsverhalten
+# --------------------------------------------------------------------------- #
+_RISKY_PORTS = {
+    23: "Telnet", 2323: "Telnet", 512: "rexec", 513: "rlogin", 514: "rsh",
+    3389: "RDP", 5900: "VNC", 445: "SMB", 139: "NetBIOS", 1433: "MSSQL",
+    3306: "MySQL", 5432: "PostgreSQL", 6379: "Redis", 27017: "MongoDB",
+    9200: "Elasticsearch", 4444: "Metasploit", 31337: "Back-Orifice",
+}
+
+
+def connection_anomalies(packets: list[Packet], half_open_min: int = 20,
+                         fail_min: int = 20) -> list[Finding]:
+    """SYN-Flood/Half-Open, Verbindungs-Fehlerrate, riskante Ziel-Ports."""
+    out: list[Finding] = []
+    syn_sent: dict[str, int] = {}
+    synack_to: dict[str, int] = {}        # SYN/ACK-Empfänger (= Client)
+    rst_to: dict[str, int] = {}
+    risky_seen: set = set()
+    for p in packets:
+        seg = tcp_segment(p.raw)
+        if seg is None:
+            continue
+        _seq, _ack, flags, _payload = seg
+        is_syn = bool(flags & SYN) and not (flags & ACK)
+        is_synack = bool(flags & SYN) and bool(flags & ACK)
+        if is_syn:
+            syn_sent[p.src] = syn_sent.get(p.src, 0) + 1
+            dp = p.dst_port
+            if dp in _RISKY_PORTS:
+                key = (p.src, p.dst, dp)
+                if key not in risky_seen:
+                    risky_seen.add(key)
+                    public = is_public(p.dst) or is_public(p.src)
+                    if dp in (23, 2323):
+                        out.append(Finding(
+                            SEV_WARN, "Security",
+                            f"Telnet (Klartext-Login): {p.src} → {p.dst} – "
+                            "Anmeldedaten werden unverschlüsselt übertragen",
+                            p.number))
+                    else:
+                        out.append(Finding(
+                            SEV_WARN if public else SEV_NOTE, "Security",
+                            f"Verbindung zu riskantem Dienst "
+                            f"{_RISKY_PORTS[dp]} (Port {dp}): {p.src} → {p.dst}",
+                            p.number))
+        elif is_synack:
+            synack_to[p.dst] = synack_to.get(p.dst, 0) + 1
+        if flags & RST:
+            rst_to[p.dst] = rst_to.get(p.dst, 0) + 1
+    for src, sent in syn_sent.items():
+        got = synack_to.get(src, 0)
+        if sent >= half_open_min and got < sent * 0.5:
+            out.append(Finding(
+                SEV_WARN, "Security",
+                f"Viele unvollständige Verbindungen (SYN-Flood/Half-Open): "
+                f"{src} sendete {sent} SYN, erhielt nur {got} SYN/ACK"))
+    for host, rst in rst_to.items():
+        if rst >= fail_min:
+            out.append(Finding(
+                SEV_NOTE, "TCP",
+                f"Hohe Verbindungs-Fehlerrate: {host} erhielt {rst} RST"))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# D — Volumen / DoS / Tunneling
+# --------------------------------------------------------------------------- #
+def _icmp_echo_payload(raw: bytes) -> bytes | None:
+    if len(raw) < 20 or (raw[0] >> 4) != 4 or raw[9] != 1:
+        return None
+    ihl = max(20, min(_ihl(raw), len(raw)))
+    icmp = raw[ihl:]
+    if len(icmp) < 8 or icmp[0] not in (0, 8):           # nur Echo Request/Reply
+        return None
+    return icmp[8:]
+
+
+def traffic_anomalies(packets: list[Packet], pps_min: int = 2000,
+                      icmp_payload_min: int = 120,
+                      icmp_count_min: int = 10) -> list[Finding]:
+    """Traffic-Spitzen/Floods, ICMP-Tunneling, NTP-Amplification (monlist)."""
+    out: list[Finding] = []
+    pps_bucket: dict[tuple, int] = {}        # (src, Sekunde) -> Pakete
+    icmp_big: dict[str, int] = {}
+    ntp_mode7: set = set()
+    for p in packets:
+        pps_bucket[(p.src, int(p.ts))] = pps_bucket.get((p.src, int(p.ts)), 0) + 1
+        if p.l4 == "ICMP":
+            pl = _icmp_echo_payload(p.raw)
+            if pl is not None and len(pl) >= icmp_payload_min:
+                icmp_big[p.src] = icmp_big.get(p.src, 0) + 1
+        if p.src_port == 123 or p.dst_port == 123:
+            pl = _udp_payload(p.raw)
+            if pl and (pl[0] & 0x07) == 7:               # NTP mode 7 (privat)
+                ntp_mode7.add((p.src, p.dst))
+    peak: dict[str, int] = {}
+    for (src, _sec), cnt in pps_bucket.items():
+        if cnt > peak.get(src, 0):
+            peak[src] = cnt
+    for src, cnt in peak.items():
+        if cnt >= pps_min:
+            out.append(Finding(
+                SEV_WARN, "Security",
+                f"Traffic-Spitze/Flood: {src} mit {cnt} Paketen/s"))
+    for src, cnt in icmp_big.items():
+        if cnt >= icmp_count_min:
+            out.append(Finding(
+                SEV_WARN, "Security",
+                f"Mögliches ICMP-Tunneling: {src} – {cnt} Echo-Pakete mit "
+                f"großer Nutzlast (≥{icmp_payload_min} B)"))
+    for src, dst in ntp_mode7:
+        out.append(Finding(
+            SEV_WARN, "Security",
+            f"NTP mode 7 (monlist) – Amplification-Risiko: {src} ⇄ {dst}"))
     return out
 
 

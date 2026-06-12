@@ -78,7 +78,15 @@ Die zuletzt genutzten Filter stehen als **Historie** (▼) im Filterfeld bereit.
 - **Experten-Infos:** TCP-Resets, Retransmissions, ICMP-Unreachable,
   **Port-/Host-Scan**, **Beaconing**, **Klartext-Credentials**,
   **DNS-Tunneling**, **Exfiltration** (großer Upload) und **Erstkontakte**
-  (neue externe Hosts)
+  (neue externe Hosts). Zusätzlich:
+  - **TLS-Hygiene:** veraltete TLS-Version (SSLv3/1.0/1.1), schwache Cipher,
+    selbst-signierte/abgelaufene Zertifikate, SNI↔Zertifikats-Mismatch
+  - **DNS-Auffälligkeiten:** DGA-Verdacht (zufällige Domains), hohe
+    NXDOMAIN-Rate je Host, DNS-Amplification (Antwort ≫ Anfrage)
+  - **Scan/Verbindung:** SYN-Flood/Half-Open, hohe Verbindungs-Fehlerrate,
+    riskante Ziel-Ports (Telnet/RDP/VNC/DB/Malware), Telnet-Klartext-Login
+  - **Volumen/DoS/Tunneling:** Traffic-Spitzen/Floods je Host,
+    ICMP-Tunneling (große Echo-Nutzlast), NTP-monlist (Amplification)
 - **TCP-Probleme markieren:** Retransmission/Dup-ACK/Out-of-Order je Paket in
   der Liste hervorheben (Analyse-Menü)
 - **Service-Response-Time:** Antwortzeiten je Protokoll (DNS/HTTP/SMB2)

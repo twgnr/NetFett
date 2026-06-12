@@ -852,7 +852,7 @@ def tls_info(record: bytes) -> dict[str, str]:
 
     Defensiv: liefert leere Strings bei Inkonsistenzen. ``record`` beginnt mit
     dem 5-Byte-TLS-Record-Kopf. Für Client-/Server-Hello implementiert."""
-    out = {"type": "", "version": "", "cipher": "", "sni": ""}
+    out = {"type": "", "version": "", "cipher": "", "sni": "", "cipher_id": ""}
     if len(record) < 6 or record[0] != 0x16:
         return out
     htype = record[5]
@@ -871,9 +871,9 @@ def tls_info(record: bytes) -> dict[str, str]:
             comp_len = record[pos]
             pos += 1 + comp_len
         elif htype == 2:                        # ServerHello
-            out["cipher"] = _TLS_CIPHERS.get(
-                int.from_bytes(record[pos:pos + 2], "big"),
-                f"0x{int.from_bytes(record[pos:pos + 2], 'big'):04x}")
+            cid = int.from_bytes(record[pos:pos + 2], "big")
+            out["cipher_id"] = cid
+            out["cipher"] = _TLS_CIPHERS.get(cid, f"0x{cid:04x}")
             pos += 2 + 1                        # gewählte Cipher + Compression
         best = legacy
         if pos + 2 <= len(record):
