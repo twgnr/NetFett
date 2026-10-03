@@ -30,6 +30,8 @@ from ctypes.wintypes import (
     BYTE, DWORD, HANDLE, LARGE_INTEGER, LONG, LPWSTR, ULONG, USHORT, WCHAR,
 )
 
+from ..i18n import tr
+
 ULONGLONG = ctypes.c_ulonglong
 ULONG64 = ctypes.c_ulonglong
 UCHAR = ctypes.c_ubyte
@@ -98,7 +100,7 @@ class GUID(ctypes.Structure):
         hres = ctypes.oledll.ole32.CLSIDFromString(ctypes.c_wchar_p(text),
                                                    byref(guid))
         if hres != 0:                       # oledll wirft schon bei != S_OK
-            raise ValueError(f"ungültige GUID: {text}")
+            raise ValueError(tr("ungültige GUID: {text}").format(text=text))
         return guid
 
 
@@ -228,12 +230,14 @@ _EXPECTED_SIZES = {
 
 def _check_layout() -> None:
     if ctypes.sizeof(ctypes.c_void_p) != 8:
-        raise EtwCaptureError("ETW-Backend unterstützt nur 64-Bit-Python.")
-    bad = [f"{name}: {sizeof(typ)} statt {want}"
+        raise EtwCaptureError(tr("ETW-Backend unterstützt nur 64-Bit-Python."))
+    bad = [tr("{name}: {size} statt {want}").format(
+               name=name, size=sizeof(typ), want=want)
            for name, (typ, want) in _EXPECTED_SIZES.items()
            if sizeof(typ) != want]
     if bad:
-        raise EtwCaptureError("Struktur-Layout passt nicht: " + "; ".join(bad))
+        raise EtwCaptureError(tr("Struktur-Layout passt nicht: {details}").format(
+            details="; ".join(bad)))
 
 
 # --- API-Bindungen -----------------------------------------------------------
@@ -360,7 +364,7 @@ class EtwPacketCapture:
         if self._running:
             return
         if sys.platform != "win32":
-            raise EtwCaptureError("ETW gibt es nur unter Windows.")
+            raise EtwCaptureError(tr("ETW gibt es nur unter Windows."))
         _check_layout()
 
         self._start_session()
@@ -388,10 +392,11 @@ class EtwPacketCapture:
                 byref(self._session), self.session_name,
                 ctypes.cast(buf, POINTER(EVENT_TRACE_PROPERTIES)))
         if rc == ERROR_ACCESS_DENIED:
-            raise EtwCaptureError(
-                "Zugriff verweigert – ETW-Mitschnitt erfordert Administratorrechte.")
+            raise EtwCaptureError(tr(
+                "Zugriff verweigert – ETW-Mitschnitt erfordert Administratorrechte."))
         if rc != ERROR_SUCCESS:
-            raise EtwCaptureError(f"StartTrace fehlgeschlagen (Fehler {rc}).")
+            raise EtwCaptureError(
+                tr("StartTrace fehlgeschlagen (Fehler {rc}).").format(rc=rc))
         self._props_buf = buf
 
     def _stop_stale_session(self) -> None:
@@ -407,7 +412,8 @@ class EtwPacketCapture:
             self._session, byref(guid), EVENT_CONTROL_CODE_ENABLE_PROVIDER,
             TRACE_LEVEL_VERBOSE, self.keywords, 0, 0, None)
         if rc != ERROR_SUCCESS:
-            raise EtwCaptureError(f"EnableTraceEx2 fehlgeschlagen (Fehler {rc}).")
+            raise EtwCaptureError(
+                tr("EnableTraceEx2 fehlgeschlagen (Fehler {rc}).").format(rc=rc))
 
     def _open_consumer(self) -> None:
         self._cb_ref = EVENT_RECORD_CALLBACK(self._on_event)
@@ -420,7 +426,8 @@ class EtwPacketCapture:
         handle = _advapi.OpenTraceW(byref(logfile))
         if handle == INVALID_PROCESSTRACE_HANDLE:
             err = ctypes.GetLastError()
-            raise EtwCaptureError(f"OpenTrace fehlgeschlagen (Fehler {err}).")
+            raise EtwCaptureError(
+                tr("OpenTrace fehlgeschlagen (Fehler {err}).").format(err=err))
         self._consumer = ULONG64(handle)
 
     def _process(self) -> None:
@@ -429,7 +436,7 @@ class EtwPacketCapture:
         # Beim Stoppen kehrt ProcessTrace regulär zurück – nur melden, wenn der
         # Aufrufer gar nicht stoppen wollte.
         if rc != ERROR_SUCCESS and self._running:
-            self._on_error(f"ProcessTrace endete mit Fehler {rc}.")
+            self._on_error(tr("ProcessTrace endete mit Fehler {rc}.").format(rc=rc))
         self._running = False
 
     # --- Event-Verarbeitung ------------------------------------------------
@@ -463,7 +470,7 @@ class EtwPacketCapture:
                 "truncated": bool(keyword & KW_PACKET_TRUNCATED),
             })
         except Exception as exc:              # niemals in den Kernel zurückwerfen
-            self._on_error(f"Event-Verarbeitung: {exc}")
+            self._on_error(tr("Event-Verarbeitung: {exc}").format(exc=exc))
 
     # --- Abbau -------------------------------------------------------------
     def stop(self) -> None:

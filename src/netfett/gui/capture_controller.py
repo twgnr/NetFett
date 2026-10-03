@@ -14,6 +14,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from ..core.capture import CaptureError, RawSocketCapture
 from ..core.dissect import dissect
+from ..i18n import tr
 from ..core.interfaces import (
     local_ipv4_addresses, local_ipv6_addresses, primary_ipv6,
 )
@@ -118,7 +119,8 @@ class CaptureController(QObject):
         raw = full if state == "reassembled" else data
         pkt = dissect(raw, ts, 0, self._local_ips)
         if state == "reassembled":
-            pkt.info = f"[reassembliert: {count} Fragmente] {pkt.info}"
+            pkt.info = (tr("[reassembliert: {count} Fragmente]").format(count=count)
+                        + f" {pkt.info}")
         if self._capture_filter is not None and not self._capture_filter(pkt):
             with self._lock:
                 self._dropped += 1

@@ -19,6 +19,7 @@ Mehrere Begriffe mit Leerzeichen = UND.  ``or`` trennt Alternativen,
 """
 from __future__ import annotations
 
+from ..i18n import tr
 from .models import DIR_IN, DIR_OUT, Packet
 
 _PROTO_WORDS = {"tcp", "udp", "icmp", "dns", "mdns", "tls", "http", "https",
@@ -139,7 +140,7 @@ def _make_port(value: str, side: str):
     try:
         port = int(value)
     except (TypeError, ValueError):
-        raise FilterError(f"Ungültiger Port: {value!r}")
+        raise FilterError(tr("Ungültiger Port: {value!r}").format(value=value))
 
     def term(pkt: Packet) -> bool:
         if side == "src":

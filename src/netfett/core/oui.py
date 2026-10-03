@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 
+from ..i18n import tr
+
 # Auszug gängiger Hersteller (OUI = erste 3 MAC-Bytes, Großbuchstaben, 6 Hex).
 _OUI: dict[str, str] = {
     "001451": "Apple", "0017F2": "Apple", "3C0754": "Apple", "F0DBF8": "Apple",
@@ -44,7 +46,7 @@ def vendor(mac: str) -> str:
         # Bit 1 des ersten Oktetts gesetzt → lokal/zufällig administriert.
         try:
             if int(key[:2], 16) & 0x02:
-                return "(zufällige MAC)"
+                return tr("(zufällige MAC)")
         except ValueError:
             pass
     return _OUI.get(key, "")

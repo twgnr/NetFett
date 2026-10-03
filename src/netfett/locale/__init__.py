@@ -1,0 +1,1 @@
+"""Übersetzungskataloge je Sprache (Unterpakete)."""

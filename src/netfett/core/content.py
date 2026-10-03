@@ -6,6 +6,8 @@ sich als **Klartext** darstellen lassen oder (verschlüsselt/binär) besser als
 """
 from __future__ import annotations
 
+from ..i18n import tr
+
 _V6_EXT = {0, 43, 60}          # Hop-by-Hop, Routing, Destination Options
 _V6_FRAGMENT = 44
 
@@ -67,12 +69,12 @@ def content_view(raw: bytes) -> tuple[str, bool, bytes]:
     """(Beschriftung, ist_Klartext, Nutzdaten) für die Inhalts-Ansicht."""
     _proto, payload = l4_payload(raw)
     if not payload:
-        return "Keine Nutzdaten", True, b""
+        return tr("Keine Nutzdaten"), True, b""
     if is_tls_record(payload):
-        return "Verschlüsselt (TLS) – Bytes", False, payload
+        return tr("Verschlüsselt (TLS) – Bytes"), False, payload
     if is_mostly_text(payload):
-        return "Klartext", True, payload
-    return "Binär/verschlüsselt – Bytes", False, payload
+        return tr("Klartext"), True, payload
+    return tr("Binär/verschlüsselt – Bytes"), False, payload
 
 
 def as_text(data: bytes) -> str:

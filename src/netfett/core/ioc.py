@@ -9,6 +9,7 @@ from __future__ import annotations
 import ipaddress
 from dataclasses import dataclass, field
 
+from ..i18n import tr
 from .analyze import Finding, SEV_ERROR
 from .models import Packet
 
@@ -78,7 +79,8 @@ def ioc_findings(packets: list[Packet], iocs: IocSet) -> list[Finding]:
         if hit:
             out.append(Finding(
                 SEV_ERROR, "IOC",
-                f"Treffer auf {hit}: {pkt.src} → {pkt.dst}"
+                tr("Treffer auf {hit}: {src} → {dst}").format(
+                    hit=hit, src=pkt.src, dst=pkt.dst)
                 + (f" ({pkt.domain})" if pkt.domain else ""),
                 pkt.number))
     return out

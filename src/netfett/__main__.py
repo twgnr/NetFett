@@ -10,6 +10,10 @@ import sys
 
 
 def main() -> int:
+    # Sprache vor allen anderen Importen setzen (Texte auf Modulebene).
+    from .i18n import load_saved_language
+    load_saved_language()
+
     # Headless-Modus (CLI) ohne GUI, wenn „--read" angegeben ist.
     from .cli import is_headless, run_cli
     if is_headless(sys.argv):
@@ -21,6 +25,9 @@ def main() -> int:
         if not is_admin() and relaunch_as_admin():
             return 0                     # elevierte Instanz übernimmt
 
+    from pathlib import Path
+
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
     from .gui import theme
@@ -28,6 +35,9 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("NetFett")
+    icon = Path(__file__).resolve().parent / "gui" / "netfett.ico"
+    if icon.exists():
+        app.setWindowIcon(QIcon(str(icon)))
     theme.apply(app, dark=True)          # Standard: dunkles Design
     win = MainWindow()
     win.show()

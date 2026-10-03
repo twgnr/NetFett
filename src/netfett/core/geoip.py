@@ -14,6 +14,8 @@ try:                                    # optionale Abhängigkeit
 except ImportError:                     # pragma: no cover - umgebungsabhängig
     maxminddb = None
 
+from ..i18n import language, tr
+
 # Geöffnete Reader + zugehörige Pfade (mehrere DBs lassen sich kombinieren).
 _readers: list = []
 _paths: list[str] = []
@@ -46,28 +48,29 @@ def clear() -> None:
 def add_database(path: str) -> str:
     """Lädt eine ``.mmdb``. Gibt eine Status-/Fehlermeldung zurück."""
     if maxminddb is None:
-        return ("GeoIP nicht verfügbar – Paket 'maxminddb' fehlt "
-                "(pip install maxminddb).")
+        return tr("GeoIP nicht verfügbar – Paket 'maxminddb' fehlt "
+                  "(pip install maxminddb).")
     try:
         reader = maxminddb.open_database(path)
     except (OSError, ValueError) as exc:
-        return f"Konnte GeoIP-Datenbank nicht laden: {exc}"
+        return tr("Konnte GeoIP-Datenbank nicht laden: {exc}").format(exc=exc)
     _readers.append(reader)
     _paths.append(path)
-    return f"GeoIP-Datenbank geladen: {path}"
+    return tr("GeoIP-Datenbank geladen: {path}").format(path=path)
 
 
 def status() -> str:
     if maxminddb is None:
-        return "GeoIP: Bibliothek 'maxminddb' nicht installiert."
+        return tr("GeoIP: Bibliothek 'maxminddb' nicht installiert.")
     if not _readers:
-        return "GeoIP: keine Datenbank geladen."
-    return f"GeoIP: {len(_readers)} Datenbank(en) geladen."
+        return tr("GeoIP: keine Datenbank geladen.")
+    return tr("GeoIP: {n} Datenbank(en) geladen.").format(n=len(_readers))
 
 
 def _names(node: dict) -> str:
     names = node.get("names", {}) if isinstance(node, dict) else {}
-    return names.get("de") or names.get("en") or ""
+    # Ortsnamen bevorzugt in der Oberflächensprache (Fallback de → en).
+    return names.get(language()) or names.get("de") or names.get("en") or ""
 
 
 def lookup(ip: str) -> dict | None:

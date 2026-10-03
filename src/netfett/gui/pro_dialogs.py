@@ -19,6 +19,7 @@ from ..core.coloring import ColorRule
 from ..core.displayfilter import FilterError, compile_filter
 from ..core.extract import suggest_filename
 from ..core.ioc import IocSet, ioc_findings
+from ..i18n import tr
 from .charts import MultiLineChart
 from .graph_widget import human
 from .theme import THEME
@@ -34,28 +35,28 @@ class RuleEditDialog(QDialog):
 
     def __init__(self, rule: ColorRule, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Regel bearbeiten")
+        self.setWindowTitle(tr("Regel bearbeiten"))
         self.resize(420, 200)
         self._fg = rule.fg
         self._bg = rule.bg
         grid = QGridLayout(self)
-        grid.addWidget(QLabel("Name:"), 0, 0)
+        grid.addWidget(QLabel(tr("Name:")), 0, 0)
         self.name = QLineEdit(rule.name, self)
         grid.addWidget(self.name, 0, 1, 1, 2)
-        grid.addWidget(QLabel("Filter:"), 1, 0)
+        grid.addWidget(QLabel(tr("Filter:")), 1, 0)
         self.filter = QLineEdit(rule.filter_text, self)
-        self.filter.setPlaceholderText("z. B.  tcp dst port 443")
+        self.filter.setPlaceholderText(tr("z. B.  tcp dst port 443"))
         grid.addWidget(self.filter, 1, 1, 1, 2)
 
-        self.chk_bg = QCheckBox("Hintergrund", self)
+        self.chk_bg = QCheckBox(tr("Hintergrund"), self)
         self.chk_bg.setChecked(bool(rule.bg))
-        self.btn_bg = QPushButton("Farbe…", self)
+        self.btn_bg = QPushButton(tr("Farbe…"), self)
         self.btn_bg.clicked.connect(lambda: self._pick("bg"))
         grid.addWidget(self.chk_bg, 2, 0)
         grid.addWidget(self.btn_bg, 2, 1)
-        self.chk_fg = QCheckBox("Schriftfarbe", self)
+        self.chk_fg = QCheckBox(tr("Schriftfarbe"), self)
         self.chk_fg.setChecked(bool(rule.fg))
-        self.btn_fg = QPushButton("Farbe…", self)
+        self.btn_fg = QPushButton(tr("Farbe…"), self)
         self.btn_fg.clicked.connect(lambda: self._pick("fg"))
         grid.addWidget(self.chk_fg, 3, 0)
         grid.addWidget(self.btn_fg, 3, 1)
@@ -68,7 +69,7 @@ class RuleEditDialog(QDialog):
 
     def _pick(self, which: str) -> None:
         start = QColor(getattr(self, f"_{which}") or "#888888")
-        col = QColorDialog.getColor(start, self, "Farbe wählen")
+        col = QColorDialog.getColor(start, self, tr("Farbe wählen"))
         if col.isValid():
             setattr(self, f"_{which}", col.name())
             (self.chk_bg if which == "bg" else self.chk_fg).setChecked(True)
@@ -80,7 +81,7 @@ class RuleEditDialog(QDialog):
 
     def result_rule(self) -> ColorRule:
         return ColorRule(
-            self.name.text().strip() or "Regel", self.filter.text().strip(),
+            self.name.text().strip() or tr("Regel"), self.filter.text().strip(),
             self._fg if self.chk_fg.isChecked() else "",
             self._bg if self.chk_bg.isChecked() else "", True)
 
@@ -90,15 +91,15 @@ class ColoringRulesDialog(QDialog):
 
     def __init__(self, rules: list[ColorRule], parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Einfärbe-Regeln")
+        self.setWindowTitle(tr("Einfärbe-Regeln"))
         self.resize(560, 420)
         self._rules = [ColorRule(r.name, r.filter_text, r.fg, r.bg, r.enabled)
                        for r in rules]
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Erste passende Regel bestimmt die Farbe "
-                             "(von oben nach unten)."))
+        lay.addWidget(QLabel(tr("Erste passende Regel bestimmt die Farbe "
+                                "(von oben nach unten).")))
         self.tree = QTreeWidget(self)
-        self.tree.setHeaderLabels(["Aktiv", "Name", "Filter"])
+        self.tree.setHeaderLabels([tr("Aktiv"), tr("Name"), tr("Filter")])
         self.tree.setRootIsDecorated(False)
         self.tree.setFont(_MONO)
         self.tree.itemChanged.connect(self._on_item_changed)
@@ -106,8 +107,8 @@ class ColoringRulesDialog(QDialog):
         lay.addWidget(self.tree)
 
         row = QHBoxLayout()
-        for label, slot in (("Neu", self._new), ("Bearbeiten", self._edit),
-                            ("Entfernen", self._remove), ("▲", self._up),
+        for label, slot in ((tr("Neu"), self._new), (tr("Bearbeiten"), self._edit),
+                            (tr("Entfernen"), self._remove), ("▲", self._up),
                             ("▼", self._down)):
             b = QPushButton(label, self)
             b.clicked.connect(slot)
@@ -125,7 +126,7 @@ class ColoringRulesDialog(QDialog):
         self.tree.blockSignals(True)
         self.tree.clear()
         for r in self._rules:
-            it = QTreeWidgetItem(["", r.name, r.filter_text])
+            it = QTreeWidgetItem(["", tr(r.name), r.filter_text])
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
             it.setCheckState(0, Qt.Checked if r.enabled else Qt.Unchecked)
             if r.bg:
@@ -147,7 +148,7 @@ class ColoringRulesDialog(QDialog):
         return self.tree.indexOfTopLevelItem(items[0]) if items else -1
 
     def _new(self) -> None:
-        dlg = RuleEditDialog(ColorRule("Neue Regel", "", bg="#2a2a10"), self)
+        dlg = RuleEditDialog(ColorRule(tr("Neue Regel"), "", bg="#2a2a10"), self)
         if dlg.exec():
             self._rules.append(dlg.result_rule())
             self._rebuild()
@@ -191,21 +192,22 @@ class IoGraphDialog(QDialog):
 
     def __init__(self, model, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("IO-Graph")
+        self.setWindowTitle(tr("IO-Graph"))
         self.resize(820, 560)
         self._model = model
         lay = QVBoxLayout(self)
 
-        self.chart = MultiLineChart("Durchsatz", "B/s", self)
+        self.chart = MultiLineChart(tr("Durchsatz"), "B/s", self)
         self.chart.setMinimumHeight(220)
         lay.addWidget(self.chart, 1)
 
         grid = QGridLayout()
-        grid.addWidget(QLabel("Filter-Linien (leer = alles):"), 0, 0, 1, 2)
+        grid.addWidget(QLabel(tr("Filter-Linien (leer = alles):")), 0, 0, 1, 2)
         self._edits: list[QLineEdit] = []
         for i in range(5):
             e = QLineEdit(self)
-            e.setPlaceholderText(f"Filter {i + 1}, z. B. tcp / dns / host 1.1.1.1")
+            e.setPlaceholderText(
+                tr("Filter {n}, z. B. tcp / dns / host 1.1.1.1").format(n=i + 1))
             e.returnPressed.connect(self._refresh)
             grid.addWidget(e, i + 1, 0, 1, 2)
             self._edits.append(e)
@@ -214,12 +216,12 @@ class IoGraphDialog(QDialog):
         lay.addLayout(grid)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("Einheit:"))
+        row.addWidget(QLabel(tr("Einheit:")))
         self.metric = QComboBox(self)
-        self.metric.addItems(["Bytes/s", "Pakete/s"])
+        self.metric.addItems([tr("Bytes/s"), tr("Pakete/s")])
         self.metric.currentIndexChanged.connect(self._refresh)
         row.addWidget(self.metric)
-        btn = QPushButton("Aktualisieren", self)
+        btn = QPushButton(tr("Aktualisieren"), self)
         btn.clicked.connect(self._refresh)
         row.addWidget(btn)
         row.addStretch(1)
@@ -248,7 +250,7 @@ class IoGraphDialog(QDialog):
                 e.setStyleSheet("background:#3a1414;")
         if not preds:
             preds = [None]
-            labels = ["Alle"]
+            labels = [tr("Alle")]
         by_pkt = self.metric.currentIndex() == 1
         self.chart._unit = "P/s" if by_pkt else "B/s"
         _n, series = io_timeline(self._model.all_packets, preds,
@@ -268,30 +270,31 @@ class IocDialog(QDialog):
 
     def __init__(self, packets, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("IOC-Abgleich")
+        self.setWindowTitle(tr("IOC-Abgleich"))
         self.resize(760, 460)
         self._packets = packets
         self._findings = []
         lay = QVBoxLayout(self)
 
         row = QHBoxLayout()
-        self.btn_load = QPushButton("Blockliste laden…", self)
+        self.btn_load = QPushButton(tr("Blockliste laden…"), self)
         self.btn_load.clicked.connect(self._load)
         row.addWidget(self.btn_load)
-        self.info = QLabel("Liste laden (eine IP/CIDR/Domain je Zeile, # = "
-                           "Kommentar).")
+        self.info = QLabel(tr("Liste laden (eine IP/CIDR/Domain je Zeile, # = "
+                              "Kommentar)."))
         row.addWidget(self.info, 1)
         lay.addLayout(row)
 
         self.tree = QTreeWidget(self)
-        self.tree.setHeaderLabels(["Schwere", "Indikator/Beschreibung", "Paket"])
+        self.tree.setHeaderLabels([tr("Schwere"), tr("Indikator/Beschreibung"),
+                                   tr("Paket")])
         self.tree.setRootIsDecorated(False)
         self.tree.setFont(_MONO)
         self.tree.itemDoubleClicked.connect(self._double)
         lay.addWidget(self.tree)
 
         row2 = QHBoxLayout()
-        self.btn_mark = QPushButton("Treffer markieren", self)
+        self.btn_mark = QPushButton(tr("Treffer markieren"), self)
         self.btn_mark.setEnabled(False)
         self.btn_mark.clicked.connect(self._mark)
         row2.addWidget(self.btn_mark)
@@ -303,18 +306,18 @@ class IocDialog(QDialog):
 
     def _load(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Blockliste laden", "",
-            "Textdateien (*.txt *.ioc *.csv);;Alle Dateien (*)")
+            self, tr("Blockliste laden"), "",
+            tr("Textdateien (*.txt *.ioc *.csv);;Alle Dateien (*)"))
         if not path:
             return
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 iocs = IocSet.from_text(f.read())
         except OSError as exc:
-            QMessageBox.critical(self, "NetFett – Fehler", str(exc))
+            QMessageBox.critical(self, tr("NetFett – Fehler"), str(exc))
             return
         if not iocs:
-            QMessageBox.information(self, "NetFett", "Keine Indikatoren gefunden.")
+            QMessageBox.information(self, "NetFett", tr("Keine Indikatoren gefunden."))
             return
         self._findings = ioc_findings(self._packets, iocs)
         self._show()
@@ -329,7 +332,7 @@ class IocDialog(QDialog):
             self.tree.addTopLevelItem(it)
         for c in range(3):
             self.tree.resizeColumnToContents(c)
-        self.info.setText(f"{len(self._findings)} Treffer.")
+        self.info.setText(tr("{n} Treffer.").format(n=len(self._findings)))
         self.btn_mark.setEnabled(bool(self._findings))
 
     def _double(self, item, _col) -> None:
@@ -341,7 +344,7 @@ class IocDialog(QDialog):
         nums = {f.packet for f in self._findings if f.packet}
         if nums:
             self.markRequested.emit(nums)
-            self.info.setText(f"{len(nums)} Treffer markiert.")
+            self.info.setText(tr("{n} Treffer markiert.").format(n=len(nums)))
 
 
 # --------------------------------------------------------------------------- #
@@ -361,7 +364,7 @@ class _TopologyView(QWidget):
         p.fillRect(self.rect(), QColor(THEME.bg))
         if not self._nodes:
             p.setPen(QColor(THEME.muted))
-            p.drawText(self.rect(), Qt.AlignCenter, "keine Daten")
+            p.drawText(self.rect(), Qt.AlignCenter, tr("keine Daten"))
             p.end()
             return
         w, h = self.width(), self.height()
@@ -409,11 +412,13 @@ class TopologyDialog(QDialog):
 
     def __init__(self, nodes, edges, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Netzwerk-Topologie")
+        self.setWindowTitle(tr("Netzwerk-Topologie"))
         self.resize(720, 640)
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f"{len(nodes)} Hosts, {len(edges)} Verbindungen  "
-                             "(gelb = lokal, grün = entfernt; Kantendicke = Volumen)"))
+        lay.addWidget(QLabel(
+            tr("{nodes} Hosts, {edges} Verbindungen  (gelb = lokal, grün = "
+               "entfernt; Kantendicke = Volumen)").format(
+                nodes=len(nodes), edges=len(edges))))
         area = QScrollArea(self)
         area.setWidgetResizable(True)
         area.setWidget(_TopologyView(nodes, edges, self))
@@ -429,15 +434,16 @@ class ObjectExtractDialog(QDialog):
 
     def __init__(self, objects, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Extrahierte Objekte")
+        self.setWindowTitle(tr("Extrahierte Objekte"))
         self.resize(820, 560)
         self._objects = objects
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f"{len(objects)} Objekt(e) aus dem HTTP-Verkehr"))
+        lay.addWidget(QLabel(tr("{n} Objekt(e) aus dem HTTP-Verkehr").format(
+            n=len(objects))))
 
         split = QSplitter(Qt.Horizontal, self)
         self.tree = QTreeWidget(split)
-        self.tree.setHeaderLabels(["#", "URL/Quelle", "Typ", "Größe"])
+        self.tree.setHeaderLabels(["#", tr("URL/Quelle"), tr("Typ"), tr("Größe")])
         self.tree.setRootIsDecorated(False)
         self.tree.setFont(_MONO)
         for i, o in enumerate(objects):
@@ -461,9 +467,9 @@ class ObjectExtractDialog(QDialog):
         lay.addWidget(split, 1)
 
         row = QHBoxLayout()
-        b1 = QPushButton("Speichern…", self)
+        b1 = QPushButton(tr("Speichern…"), self)
         b1.clicked.connect(self._save_one)
-        b2 = QPushButton("Alle speichern…", self)
+        b2 = QPushButton(tr("Alle speichern…"), self)
         b2.clicked.connect(self._save_all)
         row.addWidget(b1)
         row.addWidget(b2)
@@ -499,14 +505,14 @@ class ObjectExtractDialog(QDialog):
         o = self._sel()
         if o is None:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Objekt speichern",
+        path, _ = QFileDialog.getSaveFileName(self, tr("Objekt speichern"),
                                               suggest_filename(o))
         if path:
             self._write(path, o.data)
 
     def _save_all(self) -> None:
         import os
-        folder = QFileDialog.getExistingDirectory(self, "Zielordner wählen")
+        folder = QFileDialog.getExistingDirectory(self, tr("Zielordner wählen"))
         if not folder:
             return
         for i, o in enumerate(self._objects):
@@ -518,7 +524,7 @@ class ObjectExtractDialog(QDialog):
             with open(path, "wb") as f:
                 f.write(data)
         except OSError as exc:
-            QMessageBox.critical(self, "NetFett – Fehler", str(exc))
+            QMessageBox.critical(self, tr("NetFett – Fehler"), str(exc))
 
 
 # --------------------------------------------------------------------------- #
@@ -559,7 +565,7 @@ class _TraceView(QWidget):
         allpts = cli + srv
         if not allpts:
             p.setPen(QColor(THEME.muted))
-            p.drawText(self.rect(), Qt.AlignCenter, "keine Daten")
+            p.drawText(self.rect(), Qt.AlignCenter, tr("keine Daten"))
             p.end()
             return
         w, h = self.width(), self.height()
@@ -585,8 +591,12 @@ class _TraceView(QWidget):
         plot(cli, "#5aa9ff")
         plot(srv, "#ffb454")
         p.setPen(QColor(THEME.muted))
-        p.drawText(gx, h - 8, f"0 … {tmax:.2f} s   (blau=Client, orange=Server)")
+        p.drawText(gx, h - 8, tr("0 … {tmax:.2f} s   (blau=Client, orange=Server)")
+                   .format(tmax=tmax))
         p.end()
+
+
+_TRACE_MODES = ["Sequenznummer", "Durchsatz (B/s)", "Window"]
 
 
 class StreamGraphDialog(QDialog):
@@ -594,19 +604,20 @@ class StreamGraphDialog(QDialog):
 
     def __init__(self, packets, conv, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("TCP-Stream-Graph")
+        self.setWindowTitle(tr("TCP-Stream-Graph"))
         self.resize(760, 460)
         samples = tcp_trace(packets, conv.a, conv.a_port, conv.b, conv.b_port)
         lay = QVBoxLayout(self)
         row = QHBoxLayout()
-        row.addWidget(QLabel("Darstellung:"))
+        row.addWidget(QLabel(tr("Darstellung:")))
         self.mode = QComboBox(self)
-        self.mode.addItems(["Sequenznummer", "Durchsatz (B/s)", "Window"])
+        self.mode.addItems([tr(m) for m in _TRACE_MODES])
         row.addWidget(self.mode)
         row.addStretch(1)
         lay.addLayout(row)
         self.view = _TraceView(samples, self)
-        self.mode.currentTextChanged.connect(self.view.set_mode)
+        self.mode.currentIndexChanged.connect(
+            lambda i: self.view.set_mode(_TRACE_MODES[i]))
         lay.addWidget(self.view, 1)
         close = QDialogButtonBox(QDialogButtonBox.Close, self)
         close.rejected.connect(self.reject)
@@ -623,15 +634,15 @@ class DecodeAsDialog(QDialog):
         self.resize(420, 360)
         self._map = dict(mapping)
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Port wird als gewähltes Protokoll zerlegt:"))
+        lay.addWidget(QLabel(tr("Port wird als gewähltes Protokoll zerlegt:")))
         self.tree = QTreeWidget(self)
         self.tree.setHeaderLabels(["Port", "Protokoll"])
         self.tree.setRootIsDecorated(False)
         lay.addWidget(self.tree)
         row = QHBoxLayout()
-        b1 = QPushButton("Hinzufügen", self)
+        b1 = QPushButton(tr("Hinzufügen"), self)
         b1.clicked.connect(self._add)
-        b2 = QPushButton("Entfernen", self)
+        b2 = QPushButton(tr("Entfernen"), self)
         b2.clicked.connect(self._remove)
         row.addWidget(b1)
         row.addWidget(b2)
@@ -652,7 +663,7 @@ class DecodeAsDialog(QDialog):
         port, ok = QInputDialog.getInt(self, "Decode As", "Port:", 8443, 1, 65535)
         if not ok:
             return
-        proto, ok = QInputDialog.getItem(self, "Decode As", "Als Protokoll:",
+        proto, ok = QInputDialog.getItem(self, "Decode As", tr("Als Protokoll:"),
                                          ["tls", "http", "dns"], 0, False)
         if ok:
             self._map[port] = proto
@@ -699,7 +710,7 @@ class _FlowView(QWidget):
         p.fillRect(self.rect(), QColor(THEME.bg))
         if not self._events:
             p.setPen(QColor(THEME.muted))
-            p.drawText(self.rect(), Qt.AlignCenter, "keine Daten")
+            p.drawText(self.rect(), Qt.AlignCenter, tr("keine Daten"))
             p.end()
             return
         w, h = self.width(), self.height()
@@ -742,7 +753,7 @@ class FlowGraphDialog(QDialog):
     def __init__(self, packets, max_hosts: int = 6, max_events: int = 400,
                  parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Flow-Graph")
+        self.setWindowTitle(tr("Flow-Graph"))
         self.resize(820, 640)
         # Top-Hosts nach Volumen bestimmen.
         vol: dict = {}
@@ -762,8 +773,9 @@ class FlowGraphDialog(QDialog):
             if len(events) >= max_events:
                 break
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f"{len(events)} Pakete zwischen {len(hosts)} "
-                             f"Top-Hosts (max. {max_events})"))
+        lay.addWidget(QLabel(
+            tr("{events} Pakete zwischen {hosts} Top-Hosts (max. {max})").format(
+                events=len(events), hosts=len(hosts), max=max_events)))
         area = QScrollArea(self)
         area.setWidgetResizable(True)
         area.setWidget(_FlowView(hosts, events, self))

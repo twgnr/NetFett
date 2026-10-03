@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import socket
 
+from ..i18n import tr
+
 _REFERRAL_KEYS = ("refer:", "whois:", "registrar whois server:")
 
 
@@ -40,5 +42,6 @@ def whois(query: str, timeout: float = 6.0) -> str:
         try:
             text += f"\n\n=== {ref} ===\n" + _query_server(ref, query, timeout)
         except OSError as exc:
-            text += f"\n\n(Referral {ref} nicht erreichbar: {exc})"
+            text += "\n\n" + tr("(Referral {ref} nicht erreichbar: {exc})").format(
+                ref=ref, exc=exc)
     return text

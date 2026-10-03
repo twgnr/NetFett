@@ -1,189 +1,206 @@
 # NetFett
 
-**NetFett** ist ein vollwertiger Netzwerk-Monitor und Protokoll-Analyzer in **reinem
-Python** mit **PySide6**-Oberfläche. Er erfasst ein- und ausgehenden IPv4-/IPv6-
-Verkehr über einen Windows-Raw-Socket (`SIO_RCVALL`) – **ohne Npcap/WinPcap**.
-Abhängigkeiten: **PySide6** (GUI) und **cryptography** (nur für die optionale
-TLS-Entschlüsselung); die gesamte Analyse-Logik kommt ohne Fremd-Deps aus.
+*[Deutsche Version](README.de.md)*
 
-> Erfassen · Zerlegen · Filtern · Visualisieren · Analysieren – alles offline.
+**NetFett** is a full-featured network monitor and protocol analyzer written in **pure
+Python** with a **PySide6** user interface. It captures incoming and outgoing IPv4/IPv6
+traffic via a Windows raw socket (`SIO_RCVALL`) – **without Npcap/WinPcap**.
+Dependencies: **PySide6** (GUI) and **cryptography** (only for the optional
+TLS decryption); all of the analysis logic works without third-party dependencies.
+
+> Capture · Dissect · Filter · Visualize · Analyze – all offline.
+
+> **Language:** The user interface is available in **English (default) and German**
+> (*View → Sprache / Language*, takes effect after a restart). Menu names below
+> refer to the English interface.
 
 ---
 
-## Funktionen
+## Features
 
-**Erfassung & Anzeige**
-- Live-Mitschnitt allen IPv4-Verkehrs einer Schnittstelle (ein-/ausgehend)
-- Paketliste mit Nr., Zeit, Quelle/Ziel (inkl. Port), Protokoll, Länge,
-  Richtung (▲ aus / ▼ ein) und kompakter Info-Zeile
-- Schicht-Detailansicht (Baum) und – umschaltbar per Reiter – **Hex** oder
-  **Inhalt**: die tatsächlichen Nutzdaten als **Klartext** (unverschlüsselt)
-  bzw. als **Bytes/Hex** (verschlüsselt, z. B. TLS), mit Richtungsangabe
-- Hexdump mit **Byte-Hervorhebung**: Schicht/Feld anklicken → die zugehörigen
-  Bytes leuchten in Hex **und** ASCII
-- Detail-**Kontextmenü**: Feldwert kopieren oder direkt **als Filter anwenden**
-  (z. B. Quelle → `host …`, Ziel-Port → `dst port …`)
-- Auto-Scroll, der bei Live-Erfassung der neuesten Zeile folgt
-- **Zeitformat** umschaltbar: relativ (seit Start), Tageszeit oder absolut (Epoch)
-- Pakete **markieren** (Strg+M, hervorgehoben), „nächste Markierung" (F8)
+**Capture & display**
+- Live capture of all IPv4 traffic on an interface (incoming/outgoing)
+- Packet list with No., time, source/destination (incl. port), protocol, length,
+  direction (▲ out / ▼ in) and a compact info line
+- Layer detail view (tree) and – switchable via tabs – **Hex** or
+  **Content**: the actual payload as **plain text** (unencrypted)
+  or as **bytes/hex** (encrypted, e.g. TLS), with direction indicator
+- Hex dump with **byte highlighting**: click a layer/field → the corresponding
+  bytes light up in hex **and** ASCII
+- Detail **context menu**: copy a field value or **apply it as a filter** directly
+  (e.g. source → `host …`, destination port → `dst port …`)
+- Auto-scroll that follows the newest row during live capture
+- Switchable **time format**: relative (since start), time of day or absolute (epoch)
+- **Mark** packets (Ctrl+M, highlighted), "next mark" (F8)
 
-**Protokoll-Zerlegung (Dissector)**
-- IPv4 **und IPv6** (inkl. Extension-Header), TCP, UDP, ICMP, ICMPv6
-- **TCP-Optionen** (MSS, Window-Scale, SACK, Timestamps) werden ausgewertet
-- **IP-Fragment-Reassemblierung** (IPv4 **und** IPv6): zersplitterte Datagramme
-  werden zusammengesetzt; das letzte Fragment zeigt das vollständige Protokoll
-- Anwendungsschicht: DNS, mDNS, **DHCP**, **NTP**, **QUIC**, TLS, HTTP,
-  **HTTP/2** (h2c) mit **HPACK-Header-Dekodierung** (RFC 7541, inkl. Huffman +
-  dynamischer Tabelle; über TLS nach Entschlüsselung), **SMB/SMB2** (inkl.
-  Kommando, Dateiname/Pfad), **SIP** und **RTP** (heuristisch)
-- **Klartext-Mail**: **SMTP** (inkl. MAIL FROM/RCPT TO/AUTH), **POP3**, **IMAP**
-  – mit Richtungs- und Auffälligkeits-Markierung
-- **FTP-Steuerkanal** (Befehle/Antworten) und **SSH** (Versions-Banner +
-  Klartext-Handshake-Nachrichten wie KEXINIT/NEWKEYS)
-- „**Decode As**": Port→Protokoll erzwingen (z. B. 8443 als TLS)
-- **IP-Klassifizierung** (offline): erkennt Sonderbereiche (privat, Loopback,
-  CGNAT, Link-local, Multicast, Dokumentation …) und bekannte DNS-Resolver
-- **TLS-Handshake**: Server-Name (**SNI**), ausgehandelte **Version** und
-  **Cipher-Suite** (Client-/Server-Hello)
-- **HTTP**: Start-/Statuszeile (Methode, Pfad, Status) und **alle Header** in der
-  Detailansicht → erkennbar, welche Domain kontaktiert wird (auch ohne DNS)
-- Ports vieler bekannter Dienste werden benannt
+**Protocol dissection (dissector)**
+- IPv4 **and IPv6** (incl. extension headers), TCP, UDP, ICMP, ICMPv6
+- **TCP options** (MSS, window scale, SACK, timestamps) are decoded
+- **IP fragment reassembly** (IPv4 **and** IPv6): fragmented datagrams
+  are reassembled; the last fragment shows the complete protocol
+- Application layer: DNS, mDNS, **DHCP**, **NTP**, **QUIC**, TLS, HTTP,
+  **HTTP/2** (h2c) with **HPACK header decoding** (RFC 7541, incl. Huffman +
+  dynamic table; over TLS after decryption), **SMB/SMB2** (incl.
+  command, file name/path), **SIP** and **RTP** (heuristic)
+- **Plain-text mail**: **SMTP** (incl. MAIL FROM/RCPT TO/AUTH), **POP3**, **IMAP**
+  – with direction and anomaly marking
+- **FTP control channel** (commands/replies) and **SSH** (version banner +
+  plain-text handshake messages such as KEXINIT/NEWKEYS)
+- "**Decode As**": force port→protocol mapping (e.g. 8443 as TLS)
+- **IP classification** (offline): detects special ranges (private, loopback,
+  CGNAT, link-local, multicast, documentation …) and well-known DNS resolvers
+- **TLS handshake**: server name (**SNI**), negotiated **version** and
+  **cipher suite** (Client/Server Hello)
+- **HTTP**: request/status line (method, path, status) and **all headers** in the
+  detail view → shows which domain is contacted (even without DNS)
+- Ports of many well-known services are named
 
-**Anzeigefilter** (kompakte, robuste Filtersprache)
+**Display filter** (compact, robust filter language)
 ```
 tcp                      udp        icmp        dns        tls       http       https
 host <ip>                src <ip>   dst <ip>
 port <n>                 src port <n>           dst port <n>
 in                       out
-<freitext>               not <term> / ! <term>  <a> or <b>
+<free text>              not <term> / ! <term>  <a> or <b>
 ```
-Beispiele: `tcp dst port 443`, `dns or mdns`, `host 192.168.0.10 not port 53`
-Die zuletzt genutzten Filter stehen als **Historie** (▼) im Filterfeld bereit.
+Examples: `tcp dst port 443`, `dns or mdns`, `host 192.168.0.10 not port 53`
+Recently used filters are available as a **history** (▼) in the filter field.
 
-**Live-Statistik & Visualisierung**
-- Durchsatz-Graph (B/s, ein/aus) und Pakete-Graph (P/s, ein/aus)
-- **Donut-Diagramm** der Verteilung – umschaltbar zwischen **Protokollen**,
-  **Programmen** und **Kategorien** (Browser, Kommunikation, System, E-Mail,
-  Medien …); Klick auf Segment/Legende setzt einen passenden Filter
-- **Balken-Diagramm** der Top-Talkers
-- **IO-Zeitdiagramm** pro Verbindung (Bytes/s je Richtung) im Verbindungs-Dialog
-- Statistik-Panel: Top-Protokolle (nach Volumen, mit %) und Top-Talkers als
-  Tabelle – alle Diagramme/Tabellen aktualisieren sich im Sekundentakt
+**Live statistics & visualization**
+- Throughput graph (B/s, in/out) and packet graph (P/s, in/out)
+- **Donut chart** of the distribution – switchable between **protocols**,
+  **programs** and **categories** (browser, communication, system, e-mail,
+  media …); clicking a segment/legend entry sets a matching filter
+- **Bar chart** of the top talkers
+- **IO time chart** per connection (bytes/s per direction) in the connections dialog
+- Statistics panel: top protocols (by volume, with %) and top talkers as a
+  table – all charts/tables refresh every second
 
-**Analyse**
-- **Verbindungen (Conversations):** Aggregation pro Flow mit Paketen/Bytes je
-  Richtung, Dauer und Durchsatz
-- **Follow TCP Stream:** seq-korrekte Rekonstruktion des Byte-Stroms, Client/
-  Server farblich getrennt, umschaltbar ASCII ⇄ Hex
-- **Experten-Infos:** TCP-Resets, Retransmissions, ICMP-Unreachable,
-  **Port-/Host-Scan**, **Beaconing**, **Klartext-Credentials**,
-  **DNS-Tunneling**, **Exfiltration** (großer Upload) und **Erstkontakte**
-  (neue externe Hosts). Zusätzlich:
-  - **TLS-Hygiene:** veraltete TLS-Version (SSLv3/1.0/1.1), schwache Cipher,
-    selbst-signierte/abgelaufene Zertifikate, SNI↔Zertifikats-Mismatch
-  - **DNS-Auffälligkeiten:** DGA-Verdacht (zufällige Domains), hohe
-    NXDOMAIN-Rate je Host, DNS-Amplification (Antwort ≫ Anfrage)
-  - **Scan/Verbindung:** SYN-Flood/Half-Open, hohe Verbindungs-Fehlerrate,
-    riskante Ziel-Ports (Telnet/RDP/VNC/DB/Malware), Telnet-Klartext-Login
-  - **Volumen/DoS/Tunneling:** Traffic-Spitzen/Floods je Host,
-    ICMP-Tunneling (große Echo-Nutzlast), NTP-monlist (Amplification)
-- **TCP-Probleme markieren:** Retransmission/Dup-ACK/Out-of-Order je Paket in
-  der Liste hervorheben (Analyse-Menü)
-- **Service-Response-Time:** Antwortzeiten je Protokoll (DNS/HTTP/SMB2)
-- **Flow-Graph:** globales Leiterdiagramm aller Verbindungen (Top-Hosts)
-- **TLS-Zertifikate:** Subject/Aussteller/Gültigkeit aus dem Handshake
-- **TCP-Gesundheit:** je Verbindung Handshake-RTT, Retransmissions, Dup-ACKs
-  und Zero-Window-Ereignisse
-- **Protokoll-Hierarchie:** Baum der Protokollverteilung nach Paketen/Bytes
-- **DNS-Analyse:** Anfrage↔Antwort-Korrelation, Antwortzeiten, NXDOMAIN-Rate,
-  meistgefragte Namen und aufgelöste A/AAAA/CNAME-Adressen
-- **Endpunkte & Ports:** Volumen je einzelner Host (gesendet/empfangen),
-  Top-Dienst-Ports und Paketgrößen-Verteilung; bei geladener GeoIP-DB zusätzlich
-  **Land / ASN** je Host
-- **GeoIP (optional):** Land/Stadt/ASN über MaxMind-**GeoLite2**-Dateien
-  (`Werkzeuge → GeoIP-Datenbank laden`). Benötigt das optionale Paket
-  `maxminddb` (`pip install netfett[geoip]`) und eine selbst beschaffte
-  GeoLite2-`.mmdb`; NetFett bringt keine GeoIP-Daten mit
-- **Verbindungs-Status:** TCP-Lebenszyklus je Flow (established / FIN /
-  zurückgesetzt / fehlgeschlagen), Aufbauzeit und Dauer
-- **RTP-Streams:** je SSRC Paketzahl, **Paketverlust** und **Jitter** (RFC 3550)
-- **JA3/JA3S-Fingerprint** des TLS-Handshakes (in der Detailansicht)
-- **TLS-Entschlüsselung** mit einer `SSLKEYLOGFILE` (TLS 1.2/1.3, AEAD): Schlüssel
-  über *Werkzeuge → TLS-Schlüssel laden* einlesen, dann im Follow-Stream
-  *Entschlüsseln* – zeigt den Klartext statt der verschlüsselten Bytes
-- **Netzwerk-Topologie:** Knoten-Kanten-Diagramm „wer redet mit wem"
-  (Hosts als Knoten, Verbindungsvolumen = Kantendicke)
-- **Geräte-Übersicht / IP-Scan:** aktiver **ICMP-Ping-Sweep** des lokalen
-  Subnetzes mit angereicherten Geräte-Infos – **Gerätename** (NetBIOS, **mDNS/
-  Bonjour**, **SNMP sysName** oder Reverse-DNS), **MAC** (aus der ARP-Tabelle),
-  **Hersteller** (OUI; optional
-  Wiresharks `manuf`), **Web-Adresse** (Port 80/443, ggf. Seitentitel) und RTT
-  – **plus** je Gerät ein **kleiner Live-Durchsatz-Graph** (▲ gesendet / ▼ empf.).
-  **Doppelklick** auf ein Gerät filtert die Hauptansicht darauf; ein Klick auf
-  die **Web-Adresse** öffnet sie im Browser.
-- **IO-Graph:** Durchsatz/Pakete über Zeit mit bis zu 5 eigenen Filter-Linien
-- **IOC-/Threat-Abgleich:** Blockliste (IPs/CIDRs/Domains) aus Datei laden,
-  Treffer melden und in der Paketliste markieren
-- **Datei-/Objekt-Extraktion:** Objekte aus HTTP- (auch entschlüsselten TLS-)
-  Strömen herauslösen, ansehen (Text/Bild) und speichern
-- **TCP-Stream-Graphen:** Sequenznummer, Durchsatz und Window über die Zeit
-- **Gefilterte Statistik** und **„Decode As"** (Port→Protokoll erzwingen)
-- **Programmverkehr:** grafische Live-Aufschlüsselung des Verkehrs **nach
-  Programmen** – Donut (Volumen), **Verlaufsgraph** (Bytes/s je Top-Programm)
-  und Tabelle. Zusätzlich optionale **Programm-Spalte** in der Paketliste
-  (Ansicht → Programmspalte). Die Zuordnung Paket→Programm erfolgt über die
-  Windows-Verbindungstabellen (lokaler Port → PID → Programm) – nur bei
-  Live-Erfassung und am vollständigsten als Administrator.
-- **Besuchte Domains:** Übersicht aller kontaktierten Domains (aus DNS-Queries,
-  TLS-SNI und HTTP-Host), Doppelklick setzt sie als Filter
-- **Namensauflösung (Reverse-DNS):** PTR-Namen der Gegenstellen im
-  Verbindungs-Dialog sowie als optionale **Spalte** in der Paketliste
-  (Ansicht → Namensspalte; gecacht, im Hintergrund)
-- **Sequenzdiagramm:** Paketfluss einer Verbindung (Client ↔ Server über die
-  Zeit) – im Verbindungs-Dialog über *Sequenz…*
-- **Suche** (Strg+F / F3) springt durch die angezeigten Pakete
-- **Kontextmenü** (Rechtsklick): Stream folgen, als Filter setzen (Verbindung/
-  Host/Port)
+**Analysis**
+- **Conversations:** aggregation per flow with packets/bytes per
+  direction, duration and throughput
+- **Follow TCP Stream:** sequence-correct reconstruction of the byte stream, client/
+  server color-coded, switchable ASCII ⇄ hex
+- **Expert info:** TCP resets, retransmissions, ICMP unreachable,
+  **port/host scans**, **beaconing**, **plain-text credentials**,
+  **DNS tunneling**, **exfiltration** (large upload) and **first contacts**
+  (new external hosts). Additionally:
+  - **TLS hygiene:** outdated TLS version (SSLv3/1.0/1.1), weak ciphers,
+    self-signed/expired certificates, SNI↔certificate mismatch
+  - **DNS anomalies:** suspected DGA (random domains), high
+    NXDOMAIN rate per host, DNS amplification (response ≫ query)
+  - **Scan/connection:** SYN flood/half-open, high connection failure rate,
+    risky destination ports (Telnet/RDP/VNC/DB/malware), Telnet plain-text login
+  - **Volume/DoS/tunneling:** traffic spikes/floods per host,
+    ICMP tunneling (large echo payload), NTP monlist (amplification)
+- **Mark TCP problems:** highlight retransmission/dup-ACK/out-of-order per packet in
+  the list (*Analyze* menu)
+- **Service response time:** response times per protocol (DNS/HTTP/SMB2)
+- **Flow graph:** global ladder diagram of all connections (top hosts)
+- **TLS certificates:** subject/issuer/validity from the handshake
+- **TCP health:** per connection handshake RTT, retransmissions, dup ACKs
+  and zero-window events
+- **Protocol hierarchy:** tree of the protocol distribution by packets/bytes
+- **DNS analysis:** query↔response correlation, response times, NXDOMAIN rate,
+  most-queried names and resolved A/AAAA/CNAME addresses
+- **Endpoints & ports:** volume per individual host (sent/received),
+  top service ports and packet size distribution; with a GeoIP database loaded,
+  also **country / ASN** per host
+- **GeoIP (optional):** country/city/ASN via MaxMind **GeoLite2** files
+  (*Tools → Load GeoIP Database*). Requires the
+  optional package `maxminddb` (`pip install netfett[geoip]`) and a GeoLite2 `.mmdb`
+  you obtain yourself; NetFett does not ship any GeoIP data
+- **Connection state:** TCP lifecycle per flow (established / FIN /
+  reset / failed), setup time and duration
+- **RTP streams:** per SSRC packet count, **packet loss** and **jitter** (RFC 3550)
+- **JA3/JA3S fingerprint** of the TLS handshake (in the detail view)
+- **TLS decryption** with an `SSLKEYLOGFILE` (TLS 1.2/1.3, AEAD): load the keys
+  via *Tools → Load TLS Keys*, then click
+  *Decrypt* in Follow Stream – shows the plain text instead of the
+  encrypted bytes
+- **Network topology:** node-edge diagram of "who talks to whom"
+  (hosts as nodes, connection volume = edge thickness)
+- **Device overview / IP scan:** active **ICMP ping sweep** of the local
+  subnet with enriched device info – **device name** (NetBIOS, **mDNS/
+  Bonjour**, **SNMP sysName** or reverse DNS), **MAC** (from the ARP table),
+  **vendor** (OUI; optionally Wireshark's `manuf`), **web address** (port 80/443,
+  page title if available) and RTT – **plus** a **small live throughput graph** per
+  device (▲ sent / ▼ received).
+  **Double-click** a device to filter the main view on it; clicking the
+  **web address** opens it in the browser.
+- **IO graph:** throughput/packets over time with up to 5 custom filter lines
+- **IOC/threat matching:** load a blocklist (IPs/CIDRs/domains) from a file,
+  report hits and mark them in the packet list
+- **File/object extraction:** extract objects from HTTP (including decrypted TLS)
+  streams, view them (text/image) and save them
+- **TCP stream graphs:** sequence number, throughput and window over time
+- **Filtered statistics** and **"Decode As"** (force port→protocol)
+- **Program traffic:** graphical live breakdown of traffic **by
+  program** – donut (volume), **history graph** (bytes/s per top program)
+  and table. Additionally an optional **program column** in the packet list
+  (*View → Program Column*). Packets are mapped to
+  programs via the Windows connection tables (local port → PID → program) – only
+  during live capture and most complete when running as administrator.
+- **Visited domains:** overview of all contacted domains (from DNS queries,
+  TLS SNI and HTTP Host); double-click to set one as a filter
+- **Name resolution (reverse DNS):** PTR names of remote peers in the
+  connections dialog and as an optional **column** in the packet list
+  (*View → Name Column*; cached, in the background)
+- **Sequence diagram:** packet flow of a connection (client ↔ server over
+  time) – in the conversations dialog
+- **Search** (Ctrl+F / F3) jumps through the displayed packets
+- **Context menu** (right-click): follow stream, set as filter (connection/
+  host/port)
 
-**Langzeit-Erfassung**
-- **Live-Mitschnitt** direkt in eine PCAP-Datei (Streaming – kein RAM-Stau)
-- **Ringpuffer/Paketlimit**: nur die letzten *N* Pakete im Speicher halten
-- **Aufnahme-Filter**: uninteressante Pakete schon vor dem Speichern verwerfen
-  (gleiche Syntax wie der Anzeigefilter), Nummerierung bleibt lückenlos
+**Long-term capture**
+- **Live capture** directly into a PCAP file (streaming – no RAM build-up)
+- **Ring buffer/packet limit**: keep only the last *N* packets in memory
+- **Capture filter**: discard uninteresting packets before they are stored
+  (same syntax as the display filter); numbering stays gapless
 
-**Werkzeuge** (Menü *Werkzeuge*)
-- **Ping** und **Traceroute** (ICMP, eigener Raw-Socket – Adminrechte nötig)
-- **DNS-Lookup** (Vorwärts- und Reverse-Auflösung, ohne erhöhte Rechte)
-- **WHOIS** (TCP/43, mit Referral – Halter/Netzbereich einer Domain/IP)
+**Tools** (*Tools* menu)
+- **Ping** and **traceroute** (ICMP, own raw socket – admin rights required)
+- **DNS lookup** (forward and reverse resolution, no elevated rights needed)
+- **WHOIS** (TCP/43, with referral – registrant/network range of a domain/IP)
 
-**Hilfe**
-- Eingebautes **Handbuch** (Menü *Hilfe → Handbuch*, Taste **F1**) mit Anleitung
-  zu Erfassung, Filtern, Analyse, TLS-Entschlüsselung und Werkzeugen
+**Help**
+- Built-in **manual** (*Help → Manual*, key **F1**) with guidance
+  on capture, filters, analysis, TLS decryption and tools (German and English)
 
-**Dateien & Export**
-- PCAP/**PCAPNG öffnen** (auch **mehrere Dateien zusammenführen**) und
-  **speichern** – klassisch (`.pcap`) oder modern (`.pcapng`); optional nur die
-  aktuell **angezeigten** Pakete speichern
-- **Rotierender Mitschnitt** in Ringdateien (nach Größe, begrenzte Anzahl)
-- **Export** der Paketliste, Verbindungen oder Domains nach **CSV** oder **JSON**
+**Files & export**
+- **Open** PCAP/**PCAPNG** (also **merge multiple files**) and
+  **save** – classic (`.pcap`) or modern (`.pcapng`); optionally save only the
+  currently **displayed** packets
+- **Rotating capture** into ring files (by size, limited count)
+- **Export** the packet list, conversations or domains to **CSV** or **JSON**
 
-**Bedienung**
-- Umschaltbares **dunkles oder helles Design** (Ansicht → Helles Design)
-- Paketliste **sortierbar** (Klick auf den Spaltenkopf) und Spalten **ein-/
-  ausblendbar** (Rechtsklick auf den Spaltenkopf)
-- **Benutzerdefinierte Einfärbe-Regeln** (Ansicht → Einfärbe-Regeln): Zeilen
-  nach eigenen Filterausdrücken einfärben, mit Editor und Speicherung
-- **Einstellungen bleiben erhalten** (Design, Fenstergröße, Paketlimit,
-  Auto-Scroll, Aufnahme-Filter u. a. – via QSettings)
-- **Profile** (benannte Einstellungs-Sätze: speichern/laden/löschen),
-  **Gehe zu Paket** (Strg+G), **Paket-Kommentare** (Rechtsklick; Export als
-  pcapng-Kommentar) und **zuletzt geöffnete Dateien**
+**Usability**
+- Switchable **dark or light theme** (*View → Light Theme*)
+- **Language: German or English** (*View → Sprache / Language*; applied after a
+  restart, NetFett offers to restart right away)
+- Packet list **sortable** (click the column header) and columns can be
+  **shown/hidden** (right-click the column header)
+- **Custom coloring rules** (*View → Coloring Rules*):
+  color rows by your own filter expressions, with editor and persistence
+- **Settings are persisted** (theme, window size, packet limit,
+  auto-scroll, capture filter, etc. – via QSettings)
+- **Profiles** (named settings sets: save/load/delete),
+  **Go to packet** (Ctrl+G), **packet comments** (right-click; exported as
+  pcapng comments) and **recently opened files**
 
 ---
 
-## Installation
+## Download (Windows)
 
-Voraussetzung: **Python ≥ 3.11** (Windows für die Live-Erfassung).
+Grab the latest **`NetFett-<version>-win64.exe`** from the
+[Releases page](https://github.com/twgnr/NetFett/releases) – a single file, no
+installation and no Python needed. Windows SmartScreen may warn on first start
+because the file is not code-signed (*More info → Run anyway*). Compare the file
+with the published `.sha256` checksum if in doubt.
+
+## Installation from source
+
+Requirement: **Python ≥ 3.11** (Windows for live capture).
 
 ```powershell
 python -m venv .venv
@@ -191,103 +208,110 @@ python -m venv .venv
 pip install -e .
 ```
 
-Damit wird PySide6 installiert und das Konsolenskript `netfett` angelegt.
+This installs PySide6 and creates the `netfett` console script.
 
-## Start
+### Building the .exe yourself
+```powershell
+pip install -e .[build]
+python packaging/make_icon.py      # only needed if the icon is missing
+python packaging/build.py          # → dist/NetFett-<version>-win64.exe
+```
+
+## Running
 
 ```powershell
-# Komfortabel über das Konsolenskript …
+# Conveniently via the console script …
 netfett
-# … oder als Modul:
+# … or as a module:
 python -m netfett
 ```
 
-> **Hinweis:** Die **Live-Erfassung** benötigt unter Windows
-> **Administratorrechte** (Raw-Socket / `SIO_RCVALL`). Starte die PowerShell
-> bzw. NetFett „Als Administrator". Das **Öffnen und Analysieren von
-> PCAP-Dateien** funktioniert ohne erhöhte Rechte.
+> **Note:** **Live capture** on Windows requires
+> **administrator rights** (raw socket / `SIO_RCVALL`). Start PowerShell
+> or NetFett "as administrator". **Opening and analyzing
+> PCAP files** works without elevated rights.
 
-### Schnellstart
-1. Schnittstelle (lokale IPv4-Adresse) oben links wählen
-2. **▶ Start** – Pakete laufen ein
-3. Optional filtern, z. B. `tcp dst port 443`
-4. Paket anklicken → Details + Hex/Inhalt; Rechtsklick → **TCP-Stream folgen**
-5. Menü **Analyse** → Verbindungen / Experten-Infos / Topologie …
-6. **F1** öffnet das eingebaute Handbuch.
+### Quick start
+1. Select the interface (local IPv4 address) at the top left
+2. **▶ Start** – packets start coming in
+3. Optionally filter, e.g. `tcp dst port 443`
+4. Click a packet → details + hex/content; right-click → **Follow TCP stream**
+5. **Analyze** menu → conversations / expert info / topology …
+6. **F1** opens the built-in manual.
 
-### Kommandozeile (Headless, ohne GUI)
+### Command line (headless, no GUI)
 ```powershell
-# Mitschnitt einlesen und Zusammenfassung ausgeben
-python -m netfett --read mitschnitt.pcapng --stats
-# Verbindungen als CSV exportieren (mehrere Dateien werden zusammengeführt)
-python -m netfett --read a.pcap b.pcap --export verbindungen.csv --what conversations
+# Read a capture and print a summary
+python -m netfett --read capture.pcapng --stats
+# Export conversations as CSV (multiple files are merged)
+python -m netfett --read a.pcap b.pcap --export conversations.csv --what conversations
 ```
-Datensätze: `--what packets|conversations|domains`, Format `--format csv|json`.
+Datasets: `--what packets|conversations|domains`, format `--format csv|json`.
 
 ---
 
-## Architektur
+## Architecture
 
-Klare Trennung zwischen **reiner Logik** (`core/`, ohne GUI/I/O – vollständig per
-Unit-Test geprüft) und **Oberfläche** (`gui/`).
+Clear separation between **pure logic** (`core/`, no GUI/I/O – fully covered by
+unit tests) and **user interface** (`gui/`).
 
 ```
 src/netfett/
-├─ __main__.py            Einstiegspunkt (GUI oder Headless, UAC-Elevation)
-├─ cli.py                 Headless-Modus (--read/--stats/--export)
-├─ elevate.py             Windows-UAC-Elevation (Neustart als Administrator)
-├─ core/                  reine, getestete Logik
-│  ├─ capture.py          Windows-Raw-Socket (SIO_RCVALL), Hintergrund-Thread
-│  ├─ dissect.py          Paketzerlegung IPv4/IPv6/TCP/UDP/ICMP/DNS/DHCP/NTP/
-│  │                      QUIC/TLS/HTTP (+ TCP-Optionen, Decode-As)
-│  ├─ models.py           Packet / Layer (Datenmodelle)
-│  ├─ displayfilter.py    Anzeigefilter (Text → Packet-Prädikat)
-│  ├─ stats.py            laufende Statistik (Durchsatz, Pakete/s, Verteilung)
-│  ├─ analyze.py          Conversations, Follow-Stream, Experten-Infos,
-│  │                      Hierarchie, besuchte Domains
-│  ├─ pcap.py             PCAP lesen/schreiben + PcapWriter (Streaming-Mitschnitt)
-│  ├─ reassemble.py       IP-Fragment-Reassemblierung (IPv4/IPv6)
-│  ├─ scan.py             aktiver IP-Scan (Ping-Sweep + Geräte-Anreicherung)
-│  ├─ arp.py              ARP-Tabelle lesen (IP → MAC, GetIpNetTable)
-│  ├─ oui.py              MAC-OUI → Hersteller (+ optional manuf-Datei)
-│  ├─ netbios.py          NetBIOS-Namensabfrage (Gerätename im LAN)
-│  ├─ mdns.py             mDNS/Bonjour-Namensabfrage (.local-Hostname)
-│  ├─ snmp.py             SNMPv1-GET für sysName (Gerätename)
-│  ├─ hoststats.py        Durchsatz-Statistik je Host-IP (Geräte-Übersicht)
-│  ├─ resolve.py          Reverse-DNS (IP → Hostname), gecacht, nebenläufig
-│  ├─ ipinfo.py           Offline-IP-Klassifizierung (Sonderbereiche/Dienste)
-│  ├─ ja3.py              JA3/JA3S-Fingerprinting aus TLS-Hello
-│  ├─ tlskeys.py          SSLKEYLOGFILE + Schlüsselableitung (HKDF/PRF)
-│  ├─ tlsdecrypt.py       AEAD-Record-Entschlüsselung (cryptography)
-│  ├─ tlssession.py       ganze TLS-Verbindung entschlüsseln
-│  ├─ extract.py          HTTP-Objekt-/Datei-Extraktion
-│  ├─ procmap.py          Paket→Programm via Windows-Verbindungstabellen
-│  ├─ content.py          Nutzdaten gewinnen + Klartext/Bytes einordnen
-│  ├─ categories.py       Verkehr nach Kategorie (Browser/System/…) einordnen
-│  ├─ coloring.py         benutzerdefinierte Einfärbe-Regeln (Filter→Farbe)
-│  ├─ ioc.py              IOC-/Threat-Abgleich gegen Blockliste
-│  ├─ export.py           CSV/JSON-Export (Pakete, Verbindungen, Domains)
-│  ├─ tools.py            Ping, Traceroute, DNS-Lookup (ICMP-Bausteine testbar)
-│  ├─ whois.py            WHOIS (TCP/43, mit Referral)
-│  ├─ interfaces.py       lokale IPv4-/IPv6-Adressen ermitteln
-│  └─ protocols.py        Protokoll-/Portnamen, ICMP-Typen
+├─ __main__.py            entry point (GUI or headless, UAC elevation)
+├─ cli.py                 headless mode (--read/--stats/--export)
+├─ elevate.py             Windows UAC elevation (restart as administrator)
+├─ core/                  pure, tested logic
+│  ├─ capture.py          Windows raw socket (SIO_RCVALL), background thread
+│  ├─ dissect.py          packet dissection IPv4/IPv6/TCP/UDP/ICMP/DNS/DHCP/NTP/
+│  │                      QUIC/TLS/HTTP (+ TCP options, Decode As)
+│  ├─ models.py           Packet / Layer (data models)
+│  ├─ displayfilter.py    display filter (text → packet predicate)
+│  ├─ stats.py            running statistics (throughput, packets/s, distribution)
+│  ├─ analyze.py          conversations, follow stream, expert info,
+│  │                      hierarchy, visited domains
+│  ├─ pcap.py             PCAP read/write + PcapWriter (streaming capture)
+│  ├─ reassemble.py       IP fragment reassembly (IPv4/IPv6)
+│  ├─ scan.py             active IP scan (ping sweep + device enrichment)
+│  ├─ arp.py              read ARP table (IP → MAC, GetIpNetTable)
+│  ├─ oui.py              MAC OUI → vendor (+ optional manuf file)
+│  ├─ netbios.py          NetBIOS name query (device name on the LAN)
+│  ├─ mdns.py             mDNS/Bonjour name query (.local hostname)
+│  ├─ snmp.py             SNMPv1 GET for sysName (device name)
+│  ├─ hoststats.py        throughput statistics per host IP (device overview)
+│  ├─ resolve.py          reverse DNS (IP → hostname), cached, concurrent
+│  ├─ ipinfo.py           offline IP classification (special ranges/services)
+│  ├─ ja3.py              JA3/JA3S fingerprinting from TLS Hello
+│  ├─ tlskeys.py          SSLKEYLOGFILE + key derivation (HKDF/PRF)
+│  ├─ tlsdecrypt.py       AEAD record decryption (cryptography)
+│  ├─ tlssession.py       decrypt an entire TLS connection
+│  ├─ extract.py          HTTP object/file extraction
+│  ├─ procmap.py          packet→program via Windows connection tables
+│  ├─ content.py          extract payload + classify plain text/bytes
+│  ├─ categories.py       classify traffic by category (browser/system/…)
+│  ├─ coloring.py         custom coloring rules (filter→color)
+│  ├─ ioc.py              IOC/threat matching against a blocklist
+│  ├─ export.py           CSV/JSON export (packets, conversations, domains)
+│  ├─ tools.py            ping, traceroute, DNS lookup (testable ICMP building blocks)
+│  ├─ whois.py            WHOIS (TCP/43, with referral)
+│  ├─ interfaces.py       determine local IPv4/IPv6 addresses
+│  └─ protocols.py        protocol/port names, ICMP types
 └─ gui/
-   ├─ main_window.py      Hauptfenster: verdrahtet alle Bausteine
-   ├─ capture_controller.py  Brücke Capture-Thread → Qt (gepuffert, flüssig)
-   ├─ packet_model.py     Tabellenmodell der Paketliste (Sortierung, Regeln)
-   ├─ graph_widget.py     Live-Graph (eigener QPainter)
-   ├─ charts.py           Donut/Balken/Mehrlinien-Diagramme (eigener QPainter)
-   ├─ theme.py            Farbschema dunkel/hell + Chrome-Stylesheets
-   ├─ tools_dialogs.py    Dialoge: Ping, Traceroute, DNS-Lookup, WHOIS
-   ├─ analysis_dialogs.py Dialoge: Verbindungen, Experten-Infos, Follow-Stream,
-   │                      Hierarchie, Domains, DNS, Endpunkte, Status, …
-   ├─ pro_dialogs.py      Coloring-Rules, IO-Graph, IOC, Topologie, Objekte,
-   │                      Stream-Graph, Decode-As
-   └─ help_dialog.py      In-App-Handbuch und „Über"
+   ├─ main_window.py      main window: wires all components together
+   ├─ capture_controller.py  bridge capture thread → Qt (buffered, smooth)
+   ├─ packet_model.py     table model of the packet list (sorting, rules)
+   ├─ graph_widget.py     live graph (custom QPainter)
+   ├─ charts.py           donut/bar/multi-line charts (custom QPainter)
+   ├─ theme.py            dark/light color scheme + chrome stylesheets
+   ├─ tools_dialogs.py    dialogs: ping, traceroute, DNS lookup, WHOIS
+   ├─ analysis_dialogs.py dialogs: conversations, expert info, follow stream,
+   │                      hierarchy, domains, DNS, endpoints, state, …
+   ├─ pro_dialogs.py      coloring rules, IO graph, IOC, topology, objects,
+   │                      stream graph, Decode As
+   └─ help_dialog.py      in-app manual and "About"
 ```
 
-Der Raw-Socket liefert Pakete **ab dem IPv4-Kopf** (keine Ethernet-Schicht);
-entsprechend wird der PCAP-Link-Type `RAW` (101) verwendet.
+The raw socket delivers packets **starting at the IPv4 header** (no Ethernet layer);
+accordingly, the PCAP link type `RAW` (101) is used.
 
 ---
 
@@ -298,24 +322,26 @@ pip install pytest
 pytest
 ```
 
-Die `core`-Schicht ist ohne GUI testbar; die über 130 Tests decken Dissector,
-Anzeigefilter, Statistik/PCAP(NG), Analyse, TLS-Krypto, IP-Klassifizierung,
-Kategorien, Coloring/IOC, Objekt-Extraktion und den Headless-Modus ab.
+The `core` layer is testable without a GUI; the more than 130 tests cover the dissector,
+display filter, statistics/PCAP(NG), analysis, TLS crypto, IP classification,
+categories, coloring/IOC, object extraction and headless mode.
 
 ---
 
-## Einschränkungen
+## Limitations
 
-- **Nur Windows** für die Live-Erfassung (`SIO_RCVALL`); PCAP-Analyse ist
-  plattformunabhängig.
-- **IPv6** wird zerlegt und (best-effort über einen zweiten Raw-Socket) auch
-  live erfasst; Nicht-IP-Protokolle (z. B. ARP) liefert der Raw-Socket nicht.
-- Erfordert **Administratorrechte** für die Erfassung.
-- Der Dissector deckt die wichtigsten Protokolle ab (inkl. HTTP/2, SMB, SIP,
-  RTP), erhebt aber keinen Anspruch auf lückenlose Vollständigkeit. HTTP/2 nur im
-  Klartext (h2c); über TLS erst nach Entschlüsselung. RTP-Erkennung ist
-  heuristisch (keine festen Ports).
+- **Windows only** for live capture (`SIO_RCVALL`); PCAP analysis is
+  platform-independent.
+- **IPv6** is dissected and (best effort, via a second raw socket) also
+  captured live; the raw socket does not deliver non-IP protocols (e.g. ARP).
+- Requires **administrator rights** for capturing.
+- The dissector covers the most important protocols (incl. HTTP/2, SMB, SIP,
+  RTP) but makes no claim to complete coverage. HTTP/2 only in
+  plain text (h2c); over TLS only after decryption. RTP detection is
+  heuristic (no fixed ports).
 
-## Lizenz
+## License
 
-Privates/Lern-Projekt – siehe Repository.
+[MIT](LICENSE) © 2026 Tobias Wagner. The Windows executable bundles third-party
+components (including Qt/PySide6 under LGPL-3.0) – see
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

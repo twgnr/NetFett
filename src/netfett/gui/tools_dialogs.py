@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import tools
+from ..i18n import tr
 
 _MONO = QFont("Consolas", 9)
 
@@ -34,7 +35,7 @@ class _ToolDialog(QDialog):
         lay = QVBoxLayout(self)
 
         top = QHBoxLayout()
-        top.addWidget(QLabel("Ziel:"))
+        top.addWidget(QLabel(tr("Ziel:")))
         self.host = QLineEdit(default_host, self)
         self.host.returnPressed.connect(self._start)
         top.addWidget(self.host, 1)
@@ -95,17 +96,19 @@ class PingDialog(_ToolDialog):
             summary = tools.ping(
                 host, count=4,
                 on_result=lambda seq, rtt, addr: self.line.emit(
-                    f"  Antwort von {addr}: seq={seq}  "
-                    + (f"{rtt:.1f} ms" if rtt is not None else "Zeitüberschreitung")))
+                    tr("  Antwort von {addr}: seq={seq}  ").format(addr=addr, seq=seq)
+                    + (f"{rtt:.1f} ms" if rtt is not None
+                       else tr("Zeitüberschreitung"))))
         except PermissionError:
-            self.done.emit("\nFehler: Ping benötigt Administratorrechte.")
+            self.done.emit("\n" + tr("Fehler: Ping benötigt Administratorrechte."))
             return
         except OSError as exc:
-            self.done.emit(f"\nFehler: {exc}")
+            self.done.emit("\n" + tr("Fehler: {exc}").format(exc=exc))
             return
         self.done.emit(
-            f"\n{summary.received}/{summary.sent} Antworten, "
-            f"{summary.loss_pct:.0f}% Verlust"
+            "\n" + tr("{received}/{sent} Antworten, {loss:.0f}% Verlust").format(
+                received=summary.received, sent=summary.sent,
+                loss=summary.loss_pct)
             + _rtt_stats(summary.rtts))
 
 
@@ -114,37 +117,38 @@ class TracerouteDialog(_ToolDialog):
         super().__init__("Traceroute", parent=parent)
 
     def _run(self, host: str) -> None:
-        self.line.emit(f"Traceroute zu {host} (max. 30 Hops) …\n")
+        self.line.emit(tr("Traceroute zu {host} (max. 30 Hops) …").format(host=host)
+                       + "\n")
         try:
             tools.traceroute(
                 host, max_hops=30,
                 on_hop=lambda hop: self.line.emit(
                     f"  {hop.ttl:2d}  "
                     + (f"{hop.address:<16} {hop.rtt_ms:.1f} ms"
-                       if hop.address else "*  (keine Antwort)")))
+                       if hop.address else tr("*  (keine Antwort)"))))
         except PermissionError:
-            self.done.emit("\nFehler: Traceroute benötigt Administratorrechte.")
+            self.done.emit("\n" + tr("Fehler: Traceroute benötigt Administratorrechte."))
             return
         except OSError as exc:
-            self.done.emit(f"\nFehler: {exc}")
+            self.done.emit("\n" + tr("Fehler: {exc}").format(exc=exc))
             return
-        self.done.emit("\nFertig.")
+        self.done.emit("\n" + tr("Fertig."))
 
 
 class DnsLookupDialog(_ToolDialog):
     def __init__(self, parent=None) -> None:
-        super().__init__("DNS-Lookup", default_host="example.com", parent=parent)
+        super().__init__(tr("DNS-Lookup"), default_host="example.com", parent=parent)
 
     def _run(self, host: str) -> None:
-        self.line.emit(f"Auflösung von {host} …\n")
+        self.line.emit(tr("Auflösung von {host} …").format(host=host) + "\n")
         res = tools.dns_lookup(host)
         if res.error:
-            self.done.emit(f"Fehler: {res.error}")
+            self.done.emit(tr("Fehler: {exc}").format(exc=res.error))
             return
         for addr in res.addresses:
             ptr = res.reverse.get(addr) or "—"
             self.line.emit(f"  {addr:<20}  {ptr}")
-        self.done.emit(f"\n{len(res.addresses)} Adresse(n).")
+        self.done.emit("\n" + tr("{n} Adresse(n).").format(n=len(res.addresses)))
 
 
 class WhoisDialog(_ToolDialog):
@@ -157,7 +161,7 @@ class WhoisDialog(_ToolDialog):
         try:
             self.done.emit(whois.whois(host))
         except OSError as exc:
-            self.done.emit(f"Fehler: {exc}")
+            self.done.emit(tr("Fehler: {exc}").format(exc=exc))
 
 
 def _rtt_stats(rtts) -> str:

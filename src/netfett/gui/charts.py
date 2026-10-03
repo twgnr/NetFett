@@ -17,6 +17,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from .graph_widget import human
+from ..i18n import tr
 from .theme import THEME
 
 # Lebhafte Palette für Diagramme (kontrastreich auf dunklem Grund).
@@ -90,7 +91,7 @@ class DonutChart(QWidget):
         if total <= 0:
             p.setPen(_muted())
             p.setFont(QFont("Segoe UI", 8))
-            p.drawText(self.rect(), Qt.AlignCenter, "keine Daten")
+            p.drawText(self.rect(), Qt.AlignCenter, tr("keine Daten"))
             p.end()
             return
 
@@ -125,7 +126,7 @@ class DonutChart(QWidget):
         p.setPen(_muted())
         p.setFont(QFont("Segoe UI", 7))
         p.drawText(QRectF(cx - side / 2, cy + 4, side, 12),
-                   Qt.AlignCenter, "gesamt")
+                   Qt.AlignCenter, tr("gesamt"))
 
         # Legende.
         lx = 6 + side + 10
@@ -139,7 +140,7 @@ class DonutChart(QWidget):
             p.fillRect(lx, ly + 2, 9, 9, sw)
             p.setPen(_text())
             pct = 100 * value / total
-            text = f"{label}  {pct:.0f}%  ({human(value, self._unit)})"
+            text = f"{tr(label)}  {pct:.0f}%  ({human(value, self._unit)})"
             p.drawText(lx + 14, ly + 10, text)
             self._legend_hits.append((QRect(lx, ly, w - lx, line_h), label))
             ly += line_h
@@ -194,7 +195,7 @@ class BarChart(QWidget):
         if not self._data:
             p.setPen(_muted())
             p.setFont(QFont("Segoe UI", 8))
-            p.drawText(self.rect(), Qt.AlignCenter, "keine Daten")
+            p.drawText(self.rect(), Qt.AlignCenter, tr("keine Daten"))
             p.end()
             return
 
@@ -214,7 +215,7 @@ class BarChart(QWidget):
             color = color_for(label, i)
             # Label links (gekürzt).
             p.setPen(_text())
-            elided = _elide(p, label, label_w - 6)
+            elided = _elide(p, tr(label), label_w - 6)
             p.drawText(8, y, label_w - 6, row_h,
                        int(Qt.AlignLeft | Qt.AlignVCenter), elided)
             # Balken.
@@ -293,7 +294,7 @@ class MultiLineChart(QWidget):
                 for a, b in zip(pts, pts[1:]):
                     p.drawLine(a, b)
             # Legende rechts oben.
-            text = _elide_str(label, 18)
+            text = _elide_str(tr(label), 18)
             p.fillRect(w - 130, legend_y, 8, 8, color)
             p.setPen(_text())
             p.setFont(QFont("Segoe UI", 7))

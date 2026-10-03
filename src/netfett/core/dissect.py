@@ -11,6 +11,7 @@ import struct
 
 from . import certinfo
 from . import protocols as P
+from ..i18n import tr
 from .ipinfo import classify
 from .ja3 import ja3, ja3s
 from .models import DIR_IN, DIR_OUT, DIR_UNKNOWN, Layer, Packet
@@ -42,7 +43,7 @@ def dissect(raw: bytes, ts: float, number: int,
                  length=len(raw))
     if len(raw) < 20:
         pkt.protocol = "?"
-        pkt.info = f"Verkürztes Paket ({len(raw)} Bytes)"
+        pkt.info = tr("Verkürztes Paket ({n} Bytes)").format(n=len(raw))
         pkt.layers.append(Layer("Daten", f"{len(raw)} Bytes", length=len(raw)))
         return pkt
 
@@ -52,7 +53,7 @@ def dissect(raw: bytes, ts: float, number: int,
         return pkt
     if version != 4:
         pkt.protocol = f"IPv{version}"
-        pkt.info = f"Unbekannte IP-Version ({version})"
+        pkt.info = tr("Unbekannte IP-Version ({version})").format(version=version)
         pkt.layers.append(Layer(f"IPv{version}", length=len(raw)))
         return pkt
 
@@ -97,9 +98,9 @@ def _dissect_ipv4(raw: bytes, pkt: Packet, local_ips: set[str]) -> None:
             ("Protokoll", f"{pname} ({proto})"),
             ("Header-Prüfsumme", f"0x{checksum:04x}"),
             ("Quelle", src),
-            ("Quelle – Netz", classify(src)),
+            ("Quelle – Netz", tr(classify(src))),
             ("Ziel", dst),
-            ("Ziel – Netz", classify(dst)),
+            ("Ziel – Netz", tr(classify(dst))),
         ],
     )
     pkt.layers.append(layer)
@@ -144,7 +145,7 @@ def _ip6_str(raw16: bytes) -> str:
 def _dissect_ipv6(raw: bytes, pkt: Packet, local_ips: set[str]) -> None:
     if len(raw) < 40:
         pkt.protocol = "IPv6"
-        pkt.info = f"Verkürztes IPv6-Paket ({len(raw)} Bytes)"
+        pkt.info = tr("Verkürztes IPv6-Paket ({n} Bytes)").format(n=len(raw))
         pkt.layers.append(Layer("IPv6", length=len(raw)))
         return
     vtf, payload_len, nexthdr, hop = struct.unpack("!IHBB", raw[:8])
@@ -170,9 +171,9 @@ def _dissect_ipv6(raw: bytes, pkt: Packet, local_ips: set[str]) -> None:
             ("Next Header", f"{P.proto_name(nexthdr)} ({nexthdr})"),
             ("Hop Limit", str(hop)),
             ("Quelle", src),
-            ("Quelle – Netz", classify(src)),
+            ("Quelle – Netz", tr(classify(src))),
             ("Ziel", dst),
-            ("Ziel – Netz", classify(dst)),
+            ("Ziel – Netz", tr(classify(dst))),
         ],
     ))
 
@@ -213,12 +214,12 @@ def _skip_v6_ext(nexthdr: int, payload: bytes,
 
 def _dissect_icmpv6(data: bytes, offset: int, pkt: Packet) -> None:
     if len(data) < 4:
-        pkt.info = "Verkürztes ICMPv6-Paket"
+        pkt.info = tr("Verkürztes ICMPv6-Paket")
         return
     itype, code, csum = struct.unpack("!BBH", data[:4])
     pkt.l4 = "ICMPv6"
     pkt.protocol = "ICMPv6"
-    tname = _ICMPV6_TYPES.get(itype, f"Typ {itype}")
+    tname = _ICMPV6_TYPES.get(itype) or tr("Typ {n}").format(n=itype)
     fields = [("Typ", f"{itype} ({tname})"), ("Code", str(code)),
               ("Prüfsumme", f"0x{csum:04x}")]
     info = tname
@@ -254,7 +255,7 @@ def _tcp_options(opt: bytes) -> list[str]:
         elif kind == 3 and len(data) == 1:
             out.append(f"WScale={data[0]}")
         elif kind == 4:
-            out.append("SACK-erlaubt")
+            out.append(tr("SACK-erlaubt"))
         elif kind == 5:
             out.append("SACK")
         elif kind == 8 and len(data) == 8:
@@ -268,7 +269,7 @@ def _tcp_options(opt: bytes) -> list[str]:
 
 def _dissect_tcp(data: bytes, offset: int, pkt: Packet) -> None:
     if len(data) < 20:
-        pkt.info = "Verkürztes TCP-Segment"
+        pkt.info = tr("Verkürztes TCP-Segment")
         return
     sport, dport, seq, ack = struct.unpack("!HHII", data[:12])
     off_res = data[12]
@@ -312,7 +313,7 @@ def _dissect_tcp(data: bytes, offset: int, pkt: Packet) -> None:
 
 def _dissect_udp(data: bytes, offset: int, pkt: Packet) -> None:
     if len(data) < 8:
-        pkt.info = "Verkürztes UDP-Datagramm"
+        pkt.info = tr("Verkürztes UDP-Datagramm")
         return
     sport, dport, length, csum = struct.unpack("!HHHH", data[:8])
     payload = data[8:]
@@ -337,13 +338,13 @@ def _dissect_udp(data: bytes, offset: int, pkt: Packet) -> None:
 
 def _dissect_icmp(data: bytes, offset: int, pkt: Packet) -> None:
     if len(data) < 4:
-        pkt.info = "Verkürztes ICMP-Paket"
+        pkt.info = tr("Verkürztes ICMP-Paket")
         return
     itype, code, csum = struct.unpack("!BBH", data[:4])
     rest = data[4:]
     pkt.l4 = "ICMP"
     pkt.protocol = "ICMP"
-    tname = P.ICMP_TYPES.get(itype, f"Typ {itype}")
+    tname = P.ICMP_TYPES.get(itype) or tr("Typ {n}").format(n=itype)
     fields = [
         ("Typ", f"{itype} ({tname})"),
         ("Code", str(code)),
@@ -617,7 +618,7 @@ def _dissect_smb2(data: bytes, offset: int, plen: int, pkt: Packet) -> str:
     session_id = int.from_bytes(data[40:48], "little")
     status = int.from_bytes(data[8:12], "little")
     name = _SMB2_CMD.get(cmd, f"Cmd {cmd}")
-    direction = "Antwort" if is_resp else "Anfrage"
+    direction = tr("Antwort") if is_resp else tr("Anfrage")
     fields = [("Command", f"{cmd} ({name})"), ("Richtung", direction),
               ("Message-ID", str(msg_id)),
               ("Tree-ID", f"0x{tree_id:08x}"),
@@ -809,12 +810,12 @@ def _http_fields(payload: bytes) -> tuple[str, list[tuple[str, str]]]:
     fields: list[tuple[str, str]] = []
     parts = first.split(" ")
     if first.startswith("HTTP/"):                 # Antwort: HTTP/x.y CODE Grund
-        fields.append(("Typ", "Antwort"))
+        fields.append(("Typ", tr("Antwort")))
         fields.append(("Version", parts[0]))
         if len(parts) >= 2:
             fields.append(("Status", " ".join(parts[1:])[:80]))
     elif len(parts) >= 3:                          # Anfrage: METHODE PFAD VERSION
-        fields.append(("Typ", "Anfrage"))
+        fields.append(("Typ", tr("Anfrage")))
         fields.append(("Methode", parts[0]))
         fields.append(("Pfad", parts[1][:200]))
         fields.append(("Version", parts[2]))

@@ -10,6 +10,8 @@ import gzip
 import zlib
 from dataclasses import dataclass
 
+from ..i18n import tr
+
 
 @dataclass(slots=True)
 class HttpObject:
@@ -122,4 +124,4 @@ def suggest_filename(obj: HttpObject) -> str:
            "image/jpeg": "jpg", "image/gif": "gif", "text/css": "css",
            "application/javascript": "js", "text/plain": "txt"}.get(
         obj.content_type, "bin")
-    return f"{name or 'objekt'}.{ext}"
+    return f"{name or tr('objekt')}.{ext}"

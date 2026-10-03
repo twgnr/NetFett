@@ -12,6 +12,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
+from ..i18n import tr
 from .analyze import follow_stream
 from .models import Packet
 from .tlsdecrypt import (
@@ -141,22 +142,25 @@ def decrypt_conversation(packets: list[Packet], ip_a: str, port_a,
                          ip_b: str, port_b, keylog: dict) -> DecryptResult:
     """Versucht, die TLS-Verbindung mit den Secrets aus ``keylog`` zu entschlüsseln."""
     if not available():
-        return DecryptResult(False, "cryptography-Bibliothek nicht verfügbar.")
+        return DecryptResult(False, tr("cryptography-Bibliothek nicht verfügbar."))
     if not keylog:
-        return DecryptResult(False, "Keine TLS-Schlüssel geladen (SSLKEYLOGFILE).")
+        return DecryptResult(False, tr("Keine TLS-Schlüssel geladen (SSLKEYLOGFILE)."))
 
     stream = follow_stream(packets, ip_a, port_a, ip_b, port_b)
     c_stream, s_stream = stream.client_bytes, stream.server_bytes
     if not c_stream or not s_stream:
-        return DecryptResult(False, "Kein vollständiger TLS-Strom rekonstruierbar.")
+        return DecryptResult(
+            False, tr("Kein vollständiger TLS-Strom rekonstruierbar."))
 
     cr = _client_random(c_stream)
     sh = _server_hello(s_stream)
     if not cr or sh is None:
-        return DecryptResult(False, "ClientHello/ServerHello nicht gefunden.")
+        return DecryptResult(False, tr("ClientHello/ServerHello nicht gefunden."))
     server_random, cipher_id, is_tls13 = sh
     if cipher_id not in CIPHERS:
-        return DecryptResult(False, f"Cipher-Suite 0x{cipher_id:04x} nicht unterstützt.")
+        return DecryptResult(False, tr(
+            "Cipher-Suite 0x{cipher_id:04x} nicht unterstützt.").format(
+                cipher_id=cipher_id))
     alg, hash_name, key_len, iv_len = CIPHERS[cipher_id]
     cr_hex = cr.hex()
 
@@ -169,7 +173,7 @@ def decrypt_conversation(packets: list[Packet], ip_a: str, port_a,
         secrets = {n: keylog.get((n, cr_hex)) for n in need}
         if any(v is None for v in secrets.values()):
             return DecryptResult(
-                False, "Passende TLS-1.3-Secrets fehlen in der Keylog.")
+                False, tr("Passende TLS-1.3-Secrets fehlen in der Keylog."))
         c_hs = tls13_key_iv(secrets["CLIENT_HANDSHAKE_TRAFFIC_SECRET"],
                             hash_name, key_len, iv_len)
         s_hs = tls13_key_iv(secrets["SERVER_HANDSHAKE_TRAFFIC_SECRET"],
@@ -184,16 +188,17 @@ def decrypt_conversation(packets: list[Packet], ip_a: str, port_a,
         ms = keylog.get(("CLIENT_RANDOM", cr_hex))
         if ms is None:
             return DecryptResult(
-                False, "Master-Secret (CLIENT_RANDOM) fehlt in der Keylog.")
+                False, tr("Master-Secret (CLIENT_RANDOM) fehlt in der Keylog."))
         kb = tls12_key_block(ms, cr, server_random, key_len, iv_len, hash_name)
         c_text = _decrypt_dir_tls12(c_recs, alg, kb["client_key"], kb["client_iv"])
         s_text = _decrypt_dir_tls12(s_recs, alg, kb["server_key"], kb["server_iv"])
 
     if not c_text and not s_text:
-        return DecryptResult(False, "Entschlüsselung lieferte keine Daten "
-                                    "(falsche/fehlende Schlüssel?).")
+        return DecryptResult(False, tr("Entschlüsselung lieferte keine Daten "
+                                       "(falsche/fehlende Schlüssel?)."))
     version = "TLS 1.3" if is_tls13 else "TLS 1.2"
     return DecryptResult(
-        True, f"{version}, Cipher 0x{cipher_id:04x} – entschlüsselt.",
+        True, tr("{version}, Cipher 0x{cipher_id:04x} – entschlüsselt.").format(
+            version=version, cipher_id=cipher_id),
         client_text=c_text, server_text=s_text,
         chunks=[(True, c_text), (False, s_text)])

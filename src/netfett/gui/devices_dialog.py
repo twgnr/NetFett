@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from ..core.arp import arp_table
 from ..core.scan import enrich_host, ping_sweep, subnet_hosts
 from .graph_widget import GraphWidget, human
+from ..i18n import tr
 
 _MONO = QFont("Consolas", 9)
 
@@ -28,7 +29,7 @@ class _HostCard(QWidget):
     def __init__(self, ip: str, parent=None) -> None:
         super().__init__(parent)
         self.ip = ip
-        self.setToolTip("Doppelklick: Hauptansicht auf dieses Gerät filtern")
+        self.setToolTip(tr("Doppelklick: Hauptansicht auf dieses Gerät filtern"))
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 4, 6, 4)
         lay.setSpacing(2)
@@ -83,7 +84,7 @@ class DevicesDialog(QDialog):
 
     def __init__(self, monitor, resolver, local_ip: str, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Geräte-Übersicht")
+        self.setWindowTitle(tr("Geräte-Übersicht"))
         self.resize(560, 680)
         self._monitor = monitor
         self._resolver = resolver
@@ -94,11 +95,11 @@ class DevicesDialog(QDialog):
 
         lay = QVBoxLayout(self)
         top = QHBoxLayout()
-        self.btn_scan = QPushButton("Netzwerk scannen", self)
-        self.btn_scan.setToolTip("ICMP-Ping-Sweep des lokalen /24 (Adminrechte)")
+        self.btn_scan = QPushButton(tr("Netzwerk scannen"), self)
+        self.btn_scan.setToolTip(tr("ICMP-Ping-Sweep des lokalen /24 (Adminrechte)"))
         self.btn_scan.clicked.connect(self._scan)
         top.addWidget(self.btn_scan)
-        self.status = QLabel("Geräte aus dem Verkehr werden live angezeigt.")
+        self.status = QLabel(tr("Geräte aus dem Verkehr werden live angezeigt."))
         top.addWidget(self.status, 1)
         lay.addLayout(top)
 
@@ -128,10 +129,10 @@ class DevicesDialog(QDialog):
     def _scan(self) -> None:
         hosts = subnet_hosts(self._local_ip, 24)
         if not hosts:
-            self.status.setText("Kein lokales Subnetz erkannt.")
+            self.status.setText(tr("Kein lokales Subnetz erkannt."))
             return
         self.btn_scan.setEnabled(False)
-        self.status.setText(f"Scanne {len(hosts)} Adressen …")
+        self.status.setText(tr("Scanne {n} Adressen …").format(n=len(hosts)))
 
         def work() -> None:
             try:
@@ -166,11 +167,12 @@ class DevicesDialog(QDialog):
     def _on_scan_done(self, code: int) -> None:
         self.btn_scan.setEnabled(True)
         if code == -1:
-            self.status.setText("Scan benötigt Administratorrechte.")
+            self.status.setText(tr("Scan benötigt Administratorrechte."))
         elif code == -2:
-            self.status.setText("Scan fehlgeschlagen (Netzwerkfehler).")
+            self.status.setText(tr("Scan fehlgeschlagen (Netzwerkfehler)."))
         else:
-            self.status.setText(f"{len(self._discovered)} Gerät(e) gefunden.")
+            self.status.setText(tr("{n} Gerät(e) gefunden.").format(
+                n=len(self._discovered)))
 
     # --- Live-Aktualisierung ---------------------------------------------- #
     def _refresh(self) -> None:

@@ -11,6 +11,8 @@ import threading
 import time
 from collections.abc import Callable
 
+from ..i18n import tr
+
 
 class CaptureError(RuntimeError):
     pass
@@ -38,7 +40,7 @@ class RawSocketCapture:
             return
         if not hasattr(socket, "SIO_RCVALL"):
             raise CaptureError(
-                "SIO_RCVALL wird nur unter Windows unterstützt.")
+                tr("SIO_RCVALL wird nur unter Windows unterstützt."))
         is_v6 = ":" in self.host_ip
         try:
             if is_v6:
@@ -53,10 +55,11 @@ class RawSocketCapture:
             sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_ON)
             sock.settimeout(1.0)
         except PermissionError as exc:
-            raise CaptureError(
-                "Zugriff verweigert – bitte NetFett als Administrator starten.") from exc
+            raise CaptureError(tr(
+                "Zugriff verweigert – bitte NetFett als Administrator starten.")) from exc
         except OSError as exc:
-            raise CaptureError(f"Schnittstelle konnte nicht geöffnet werden: {exc}") from exc
+            raise CaptureError(tr("Schnittstelle konnte nicht geöffnet werden: {exc}").format(
+                exc=exc)) from exc
         self._sock = sock
         self._running = True
         self._thread = threading.Thread(target=self._loop, name="netfett-capture",

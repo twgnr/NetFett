@@ -8,6 +8,7 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QBrush, QColor, QFont
 
 from ..core.models import DIR_IN, DIR_OUT, Packet
+from ..i18n import tr
 from .theme import THEME
 
 COLUMNS = ["Nr.", "Zeit", "Quelle", "Ziel", "Protokoll", "Länge", "Ri.",
@@ -54,7 +55,7 @@ class PacketModel(QAbstractTableModel):
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
-            return COLUMNS[section]
+            return tr(COLUMNS[section])
         return None
 
     def data(self, index: QModelIndex, role=Qt.DisplayRole):

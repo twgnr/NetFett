@@ -21,6 +21,7 @@ import struct
 from dataclasses import dataclass, field
 
 from . import certinfo
+from ..i18n import tr
 from .dissect import _tls_first_cert, tls_info
 from .ipinfo import is_public
 from .models import DIR_OUT, Packet
@@ -397,7 +398,7 @@ def expert_info(packets: list[Packet], scan_port_threshold: int = 15,
         if pkt.l4 == "ICMP":
             if "Unreachable" in (pkt.info or "") or "Time Exceeded" in (pkt.info or ""):
                 findings.append(Finding(
-                    SEV_WARN, "ICMP", pkt.info or "ICMP-Fehler", pkt.number))
+                    SEV_WARN, "ICMP", pkt.info or tr("ICMP-Fehler"), pkt.number))
             continue
 
         seg = tcp_segment(pkt.raw)
@@ -407,7 +408,9 @@ def expert_info(packets: list[Packet], scan_port_threshold: int = 15,
 
         if flags & RST:
             findings.append(Finding(
-                SEV_NOTE, "TCP", f"Verbindungs-Reset (RST) {pkt.src} → {pkt.dst}",
+                SEV_NOTE, "TCP",
+                tr("Verbindungs-Reset (RST) {src} → {dst}").format(
+                    src=pkt.src, dst=pkt.dst),
                 pkt.number))
 
         # Retransmission: identisches (seq, len) mit Nutzdaten erneut gesehen.
@@ -418,7 +421,8 @@ def expert_info(packets: list[Packet], scan_port_threshold: int = 15,
             if sig in sset:
                 findings.append(Finding(
                     SEV_WARN, "TCP",
-                    f"Mögliche Retransmission (seq={seq}, len={len(payload)})",
+                    tr("Mögliche Retransmission (seq={seq}, len={length})").format(
+                        seq=seq, length=len(payload)),
                     pkt.number))
             else:
                 sset.add(sig)
@@ -433,12 +437,14 @@ def expert_info(packets: list[Packet], scan_port_threshold: int = 15,
         if len(ports) >= scan_port_threshold:
             findings.append(Finding(
                 SEV_ERROR, "Security",
-                f"Möglicher Port-Scan: {src} sendete SYN an {len(ports)} Ports"))
+                tr("Möglicher Port-Scan: {src} sendete SYN an {n} Ports").format(
+                    src=src, n=len(ports))))
     for src, hosts in syn_hosts.items():
         if len(hosts) >= scan_host_threshold:
             findings.append(Finding(
                 SEV_ERROR, "Security",
-                f"Möglicher Host-Scan: {src} sendete SYN an {len(hosts)} Hosts"))
+                tr("Möglicher Host-Scan: {src} sendete SYN an {n} Hosts").format(
+                    src=src, n=len(hosts))))
 
     findings.extend(beaconing(packets))
     findings.extend(credentials(packets))
@@ -451,7 +457,7 @@ def expert_info(packets: list[Packet], scan_port_threshold: int = 15,
     for ts, ip, domain in first_contacts(packets)[:15]:
         label = f"{ip} ({domain})" if domain else ip
         findings.append(Finding(SEV_INFO, "Erstkontakt",
-                                f"Erster Kontakt: {label}"))
+                                tr("Erster Kontakt: {label}").format(label=label)))
     return findings
 
 
@@ -569,8 +575,10 @@ def beaconing(packets: list[Packet], min_events: int = 4,
         if cv <= max_cv:
             out.append(Finding(
                 SEV_WARN, "Security",
-                f"Mögliches Beaconing: {src} → {dst}:{dport} "
-                f"alle ~{mean:.1f}s ({len(times)}×, CV={cv:.2f})"))
+                tr("Mögliches Beaconing: {src} → {dst}:{dport} "
+                   "alle ~{mean:.1f}s ({n}×, CV={cv:.2f})").format(
+                    src=src, dst=dst, dport=dport, mean=mean, n=len(times),
+                    cv=cv)))
     return out
 
 
@@ -596,19 +604,22 @@ def credentials(packets: list[Packet]) -> list[Finding]:
             if ":" in decoded:
                 out.append(Finding(
                     SEV_ERROR, "Security",
-                    f"HTTP Basic-Auth im Klartext: {decoded} "
-                    f"({pkt.src} → {pkt.dst})", pkt.number))
+                    tr("HTTP Basic-Auth im Klartext: {cred} ({src} → {dst})")
+                    .format(cred=decoded, src=pkt.src, dst=pkt.dst),
+                    pkt.number))
 
         if pkt.dst_port == 21 or pkt.src_port == 21:
             line = payload.split(b"\r\n", 1)[0]
             tag = line[:5].upper()
             if tag in (b"USER ", b"PASS "):
                 value = line[5:].decode("latin-1", "replace")
-                kind = "Benutzer" if tag == b"USER " else "Passwort"
+                text = (tr("FTP-Benutzer im Klartext: {value} ({src} → {dst})")
+                        if tag == b"USER " else
+                        tr("FTP-Passwort im Klartext: {value} ({src} → {dst})"))
                 sev = SEV_NOTE if tag == b"USER " else SEV_ERROR
                 out.append(Finding(
                     sev, "Security",
-                    f"FTP-{kind} im Klartext: {value} ({pkt.src} → {pkt.dst})",
+                    text.format(value=value, src=pkt.src, dst=pkt.dst),
                     pkt.number))
     return out
 
@@ -1149,9 +1160,11 @@ def dns_tunneling(packets: list[Packet], min_queries: int = 20,
                 and cnt and sublen / cnt >= min_avg_sub):
             out.append(Finding(
                 SEV_WARN, "Security",
-                f"Mögliches DNS-Tunneling: {src} → {base} "
-                f"({cnt} Anfragen, {len(subs)} eindeutige Subdomains, "
-                f"Ø {sublen // cnt} Zeichen)"))
+                tr("Mögliches DNS-Tunneling: {src} → {base} "
+                   "({cnt} Anfragen, {subs} eindeutige Subdomains, "
+                   "Ø {avg} Zeichen)").format(
+                    src=src, base=base, cnt=cnt, subs=len(subs),
+                    avg=sublen // cnt)))
     return out
 
 
@@ -1168,7 +1181,8 @@ def exfiltration(packets: list[Packet],
             mb = total / (1024 * 1024)
             findings.append(Finding(
                 SEV_WARN, "Security",
-                f"Großes ausgehendes Volumen: {mb:.1f} MB → {dst}"))
+                tr("Großes ausgehendes Volumen: {mb:.1f} MB → {dst}").format(
+                    mb=mb, dst=dst)))
     return findings
 
 
@@ -1240,7 +1254,8 @@ def tls_hygiene(packets: list[Packet]) -> list[Finding]:
                 weak_seen.add(key)
                 out.append(Finding(
                     SEV_WARN, "TLS",
-                    f"Veraltete TLS-Version {info['version']}: {p.src} ⇄ {p.dst}",
+                    tr("Veraltete TLS-Version {version}: {src} ⇄ {dst}").format(
+                        version=info["version"], src=p.src, dst=p.dst),
                     p.number))
         if htype == "Server Hello" and info["cipher"]:
             cid = info.get("cipher_id")
@@ -1252,8 +1267,9 @@ def tls_hygiene(packets: list[Packet]) -> list[Finding]:
                     cipher_seen.add(key)
                     out.append(Finding(
                         SEV_WARN, "TLS",
-                        f"Schwache Cipher-Suite {info['cipher']}: "
-                        f"{p.src} → {p.dst}", p.number))
+                        tr("Schwache Cipher-Suite {cipher}: {src} → {dst}")
+                        .format(cipher=info["cipher"], src=p.src, dst=p.dst),
+                        p.number))
         if len(payload) > 5 and payload[5] == 11:          # Certificate
             der = _tls_first_cert(payload)
             d = certinfo.details(der) if der else None
@@ -1263,22 +1279,24 @@ def tls_hygiene(packets: list[Packet]) -> list[Finding]:
             if d["self_signed"]:
                 out.append(Finding(
                     SEV_NOTE, "TLS",
-                    f"Selbst-signiertes Zertifikat: {subj} ({p.src})", p.number))
+                    tr("Selbst-signiertes Zertifikat: {subj} ({src})").format(
+                        subj=subj, src=p.src), p.number))
             if d["not_after_ts"] < p.ts:
                 out.append(Finding(
                     SEV_WARN, "TLS",
-                    f"Abgelaufenes Zertifikat: {subj} (gültig bis "
-                    f"{d['not_after']})", p.number))
+                    tr("Abgelaufenes Zertifikat: {subj} (gültig bis {date})")
+                    .format(subj=subj, date=d["not_after"]), p.number))
             elif d["not_before_ts"] > p.ts:
                 out.append(Finding(
                     SEV_NOTE, "TLS",
-                    f"Zertifikat noch nicht gültig: {subj} (ab "
-                    f"{d['not_before']})", p.number))
+                    tr("Zertifikat noch nicht gültig: {subj} (ab {date})")
+                    .format(subj=subj, date=d["not_before"]), p.number))
             sni = sni_by_conn.get(conn)
             if sni and d["names"] and not _host_matches_cert(sni, d["names"]):
                 out.append(Finding(
                     SEV_NOTE, "TLS",
-                    f"SNI ≠ Zertifikat: angefragt {sni}, Zertifikat {subj}",
+                    tr("SNI ≠ Zertifikat: angefragt {sni}, Zertifikat {subj}")
+                    .format(sni=sni, subj=subj),
                     p.number))
     return out
 
@@ -1335,7 +1353,8 @@ def dns_anomalies(packets: list[Packet], nx_min: int = 15,
                 dga_seen.add(sld)
                 out.append(Finding(
                     SEV_NOTE, "DNS",
-                    f"DGA-Verdacht (zufällig wirkende Domain): {msg.qname}"))
+                    tr("DGA-Verdacht (zufällig wirkende Domain): {name}").format(
+                        name=msg.qname)))
             pending_len[(msg.txid, msg.qname.lower())] = len(pl)
         else:
             acc = nx_by_host.setdefault(p.dst, [0, 0])
@@ -1346,14 +1365,16 @@ def dns_anomalies(packets: list[Packet], nx_min: int = 15,
             if qlen and len(pl) >= max(512, qlen * amp_factor):
                 out.append(Finding(
                     SEV_NOTE, "DNS",
-                    f"DNS-Amplification: Antwort {len(pl)} B ≫ Anfrage {qlen} B "
-                    f"({msg.qname})", p.number))
+                    tr("DNS-Amplification: Antwort {resp} B ≫ Anfrage {req} B "
+                       "({name})").format(resp=len(pl), req=qlen, name=msg.qname),
+                    p.number))
     for host, (nx, total) in nx_by_host.items():
         if total >= 20 and nx >= nx_min and nx / total >= 0.5:
             out.append(Finding(
                 SEV_WARN, "DNS",
-                f"Hohe NXDOMAIN-Rate: {host} erhielt {nx}/{total} NXDOMAIN "
-                "(nicht gefunden) – DGA-/Schadsoftware-Verdacht"))
+                tr("Hohe NXDOMAIN-Rate: {host} erhielt {nx}/{total} NXDOMAIN "
+                   "(nicht gefunden) – DGA-/Schadsoftware-Verdacht").format(
+                    host=host, nx=nx, total=total)))
     return out
 
 
@@ -1394,14 +1415,17 @@ def connection_anomalies(packets: list[Packet], half_open_min: int = 20,
                     if dp in (23, 2323):
                         out.append(Finding(
                             SEV_WARN, "Security",
-                            f"Telnet (Klartext-Login): {p.src} → {p.dst} – "
-                            "Anmeldedaten werden unverschlüsselt übertragen",
+                            tr("Telnet (Klartext-Login): {src} → {dst} – "
+                               "Anmeldedaten werden unverschlüsselt übertragen")
+                            .format(src=p.src, dst=p.dst),
                             p.number))
                     else:
                         out.append(Finding(
                             SEV_WARN if public else SEV_NOTE, "Security",
-                            f"Verbindung zu riskantem Dienst "
-                            f"{_RISKY_PORTS[dp]} (Port {dp}): {p.src} → {p.dst}",
+                            tr("Verbindung zu riskantem Dienst "
+                               "{service} (Port {port}): {src} → {dst}").format(
+                                service=_RISKY_PORTS[dp], port=dp,
+                                src=p.src, dst=p.dst),
                             p.number))
         elif is_synack:
             synack_to[p.dst] = synack_to.get(p.dst, 0) + 1
@@ -1412,13 +1436,15 @@ def connection_anomalies(packets: list[Packet], half_open_min: int = 20,
         if sent >= half_open_min and got < sent * 0.5:
             out.append(Finding(
                 SEV_WARN, "Security",
-                f"Viele unvollständige Verbindungen (SYN-Flood/Half-Open): "
-                f"{src} sendete {sent} SYN, erhielt nur {got} SYN/ACK"))
+                tr("Viele unvollständige Verbindungen (SYN-Flood/Half-Open): "
+                   "{src} sendete {sent} SYN, erhielt nur {got} SYN/ACK").format(
+                    src=src, sent=sent, got=got)))
     for host, rst in rst_to.items():
         if rst >= fail_min:
             out.append(Finding(
                 SEV_NOTE, "TCP",
-                f"Hohe Verbindungs-Fehlerrate: {host} erhielt {rst} RST"))
+                tr("Hohe Verbindungs-Fehlerrate: {host} erhielt {rst} RST").format(
+                    host=host, rst=rst)))
     return out
 
 
@@ -1461,17 +1487,20 @@ def traffic_anomalies(packets: list[Packet], pps_min: int = 2000,
         if cnt >= pps_min:
             out.append(Finding(
                 SEV_WARN, "Security",
-                f"Traffic-Spitze/Flood: {src} mit {cnt} Paketen/s"))
+                tr("Traffic-Spitze/Flood: {src} mit {cnt} Paketen/s").format(
+                    src=src, cnt=cnt)))
     for src, cnt in icmp_big.items():
         if cnt >= icmp_count_min:
             out.append(Finding(
                 SEV_WARN, "Security",
-                f"Mögliches ICMP-Tunneling: {src} – {cnt} Echo-Pakete mit "
-                f"großer Nutzlast (≥{icmp_payload_min} B)"))
+                tr("Mögliches ICMP-Tunneling: {src} – {cnt} Echo-Pakete mit "
+                   "großer Nutzlast (≥{size} B)").format(
+                    src=src, cnt=cnt, size=icmp_payload_min)))
     for src, dst in ntp_mode7:
         out.append(Finding(
             SEV_WARN, "Security",
-            f"NTP mode 7 (monlist) – Amplification-Risiko: {src} ⇄ {dst}"))
+            tr("NTP mode 7 (monlist) – Amplification-Risiko: {src} ⇄ {dst}")
+            .format(src=src, dst=dst)))
     return out
 
 
@@ -1566,24 +1595,27 @@ def tcp_expert_flags(packets: list[Packet]) -> dict[int, str]:
             sset = seen.setdefault(d, set())
             sig = (seq, len(payload))
             if sig in sset:
-                flags[p.number] = (
-                    f"Retransmission – Segment Seq={seq} ({len(payload)} Bytes) "
-                    "wurde bereits gesendet (vermutlich Paketverlust)")
+                flags[p.number] = tr(
+                    "Retransmission – Segment Seq={seq} ({n} Bytes) "
+                    "wurde bereits gesendet (vermutlich Paketverlust)").format(
+                    seq=seq, n=len(payload))
             else:
                 sset.add(sig)
                 hi = high.get(d)
                 if hi is not None and seq < hi:
-                    flags[p.number] = (
-                        f"Out-of-Order – Seq={seq} liegt vor dem bereits "
-                        f"empfangenen Ende {hi} (Segment kam verspätet/vertauscht)")
+                    flags[p.number] = tr(
+                        "Out-of-Order – Seq={seq} liegt vor dem bereits "
+                        "empfangenen Ende {hi} (Segment kam verspätet/vertauscht)"
+                    ).format(seq=seq, hi=hi)
                 high[d] = max(hi or 0, seq + len(payload))
         elif fl & ACK:
             la = last_ack.get(d)
             if la is not None and la[0] == ack:
                 la[1] += 1
-                flags[p.number] = (
-                    f"Dup-ACK #{la[1]} – ACK={ack} wiederholt; der Empfänger "
-                    "fordert ein fehlendes Segment erneut an")
+                flags[p.number] = tr(
+                    "Dup-ACK #{n} – ACK={ack} wiederholt; der Empfänger "
+                    "fordert ein fehlendes Segment erneut an").format(
+                    n=la[1], ack=ack)
             else:
                 last_ack[d] = [ack, 0]
     return flags

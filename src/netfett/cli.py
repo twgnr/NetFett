@@ -13,6 +13,7 @@ from .core.dissect import dissect
 from .core.export import export_conversations, export_domains, export_packets
 from .core.pcap import merge_captures, read_capture
 from .core.stats import Stats
+from .i18n import tr
 
 
 def is_headless(argv) -> bool:
@@ -26,11 +27,11 @@ def _load(paths) -> list:
 
 def run_cli(argv) -> int:
     ap = argparse.ArgumentParser(prog="netfett", add_help=True,
-                                 description="NetFett – Headless-Analyse")
-    ap.add_argument("--read", nargs="+", metavar="DATEI", required=True,
-                    help="Capture-Datei(en) (pcap/pcapng); mehrere = zusammenführen")
-    ap.add_argument("--stats", action="store_true", help="Zusammenfassung ausgeben")
-    ap.add_argument("--export", metavar="DATEI", help="Analyse exportieren")
+                                 description=tr("NetFett – Headless-Analyse"))
+    ap.add_argument("--read", nargs="+", metavar=tr("DATEI"), required=True,
+                    help=tr("Capture-Datei(en) (pcap/pcapng); mehrere = zusammenführen"))
+    ap.add_argument("--stats", action="store_true", help=tr("Zusammenfassung ausgeben"))
+    ap.add_argument("--export", metavar=tr("DATEI"), help=tr("Analyse exportieren"))
     ap.add_argument("--what", choices=["packets", "conversations", "domains"],
                     default="packets")
     ap.add_argument("--format", choices=["csv", "json"], default="csv")
@@ -39,9 +40,10 @@ def run_cli(argv) -> int:
     try:
         packets = _load(args.read)
     except (OSError, ValueError) as exc:
-        print(f"Fehler beim Lesen: {exc}")
+        print(tr("Fehler beim Lesen: {exc}").format(exc=exc))
         return 2
-    print(f"{len(packets)} Pakete gelesen aus {', '.join(args.read)}")
+    print(tr("{n} Pakete gelesen aus {files}").format(
+        n=len(packets), files=", ".join(args.read)))
 
     if args.stats or not args.export:
         _print_stats(packets)
@@ -53,7 +55,7 @@ def run_cli(argv) -> int:
             with open(args.export, "w", encoding="utf-8", newline="") as f:
                 f.write(builder(packets, args.format))
         except OSError as exc:
-            print(f"Export fehlgeschlagen: {exc}")
+            print(tr("Export fehlgeschlagen: {exc}").format(exc=exc))
             return 2
         print(f"Export ({args.what}/{args.format}) → {args.export}")
     return 0
@@ -63,14 +65,16 @@ def _print_stats(packets) -> None:
     stats = Stats()
     for p in packets:
         stats.add(p)
-    print(f"  Bytes gesamt: {stats.total_bytes}")
-    print("  Top-Protokolle:")
+    print(tr("  Bytes gesamt: {n}").format(n=stats.total_bytes))
+    print(tr("  Top-Protokolle:"))
     for name, pk, by in stats.top_protocols(8):
-        print(f"    {name:<10} {pk:>7} Pakete  {by:>10} Bytes")
+        print(tr("    {name:<10} {pk:>7} Pakete  {by:>10} Bytes").format(
+            name=name, pk=pk, by=by))
     convs = conversations(packets)
-    print(f"  Verbindungen: {len(convs)}")
+    print(tr("  Verbindungen: {n}").format(n=len(convs)))
     for c in convs[:8]:
         ap = f":{c.a_port}" if c.a_port else ""
         bp = f":{c.b_port}" if c.b_port else ""
         print(f"    {c.proto:<5} {c.a}{ap} <-> {c.b}{bp}  "
-              f"{c.packets} Pakete / {c.bytes} Bytes")
+              + tr("{packets} Pakete / {bytes} Bytes").format(
+                  packets=c.packets, bytes=c.bytes))

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import struct
 
+from ..i18n import tr
+
 _MAGIC = 0xA1B2C3D4
 _VERSION = (2, 4)
 LINKTYPE_RAW = 101
@@ -115,14 +117,14 @@ def read_pcap(path: str):
     with open(path, "rb") as f:
         data = f.read()
     if len(data) < 24:
-        raise ValueError("Datei zu kurz für PCAP.")
+        raise ValueError(tr("Datei zu kurz für PCAP."))
     magic = struct.unpack("<I", data[:4])[0]
     if magic == _MAGIC:
         endian = "<"
     elif magic == 0xD4C3B2A1:
         endian = ">"
     else:
-        raise ValueError("Keine gültige PCAP-Datei (falsche Magic-Number).")
+        raise ValueError(tr("Keine gültige PCAP-Datei (falsche Magic-Number)."))
     (_v1, _v2, _tz, _sig, _snap, linktype) = struct.unpack(
         endian + "HHiIII", data[4:24])
     out = []
@@ -146,7 +148,7 @@ def read_pcapng(path: str):
     with open(path, "rb") as f:
         data = f.read()
     if len(data) < 12 or struct.unpack("<I", data[:4])[0] != _PCAPNG_SHB:
-        raise ValueError("Keine gültige pcapng-Datei.")
+        raise ValueError(tr("Keine gültige pcapng-Datei."))
     endian = "<" if data[8:12] == struct.pack("<I", _PCAPNG_BOM) else ">"
     interfaces: list[tuple[int, int]] = []     # (linktype, tsresol-Teiler)
     out = []

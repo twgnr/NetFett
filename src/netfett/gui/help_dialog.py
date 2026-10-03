@@ -6,6 +6,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
+from ..i18n import language, tr
+from .help_en import HELP_HTML_EN
 
 _HELP_HTML = """
 <h1>NetFett – Handbuch</h1>
@@ -329,6 +331,9 @@ TLS"), wenn die automatische Erkennung nicht greift.</li>
 <li><b>Profile</b>: aktuelle Einstellungen (Filter, Farben, Spalten …) unter einem
 Namen <i>speichern</i>, später <i>laden</i> oder <i>löschen</i>.</li>
 <li><b>Helles Design</b>: zwischen dunklem und hellem Thema wechseln.</li>
+<li><b>Sprache / Language</b>: Oberfläche zwischen Deutsch und Englisch
+umschalten. Die Änderung wird nach einem Neustart von NetFett wirksam (es wird
+gefragt, ob sofort neu gestartet werden soll).</li>
 </ul>
 
 <h2 id="capture">13. Menü „Aufnahme"</h2>
@@ -402,12 +407,12 @@ python -m netfett --read x.pcap --export verb.csv --what conversations</pre>
 class HelpDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("NetFett – Handbuch")
+        self.setWindowTitle(tr("NetFett – Handbuch"))
         self.resize(820, 760)
         lay = QVBoxLayout(self)
         browser = QTextBrowser(self)
         browser.setOpenExternalLinks(True)
-        browser.setHtml(_HELP_HTML)
+        browser.setHtml(HELP_HTML_EN if language() == "en" else _HELP_HTML)
         lay.addWidget(browser)
         box = QDialogButtonBox(QDialogButtonBox.Close, self)
         box.rejected.connect(self.reject)
@@ -416,8 +421,16 @@ class HelpDialog(QDialog):
 
 def about_text() -> str:
     return (f"<h3>NetFett {__version__}</h3>"
-            "<p>Vollwertiger Netzwerk-Monitor und Protokoll-Analyzer in reinem "
-            "Python (PySide6).</p>"
-            "<p>Live-Erfassung, Tiefen-Analyse, TLS-Entschlüsselung, "
-            "Sicherheits-Auswertungen und Visualisierung – lokal und offline.</p>"
-            "<p>Copyright &copy; Tobias Wagner. Alle Rechte vorbehalten.</p>")
+            "<p>" + tr("Vollwertiger Netzwerk-Monitor und Protokoll-Analyzer in "
+                       "reinem Python (PySide6).") + "</p>"
+            "<p>" + tr("Live-Erfassung, Tiefen-Analyse, TLS-Entschlüsselung, "
+                       "Sicherheits-Auswertungen und Visualisierung – lokal und "
+                       "offline.") + "</p>"
+            "<p>" + tr("Copyright &copy; 2026 Tobias Wagner. Veröffentlicht unter der MIT-Lizenz.")
+            + "</p>"
+            '<p>GitHub: <a href="https://github.com/twgnr">github.com/twgnr</a><br>'
+            'Web: <a href="https://www.twgnr.de">www.twgnr.de</a></p>'
+            '<p><small>' + tr("Enthält Qt/PySide6 (LGPL-3.0) und weitere Komponenten – "
+                             "siehe <a href=\"{url}\">Third-Party Notices</a>.").format(
+                url="https://github.com/twgnr/NetFett/blob/main/THIRD-PARTY-NOTICES.md")
+            + '</small></p>')
